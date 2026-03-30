@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sign_up.dart';
-import '../dbhelper/mongodb.dart'; 
+import '../dbhelper/mongodb.dart';
 
 class SignUpScreen extends StatefulWidget {
   final VoidCallback? onSignUpSuccess;
@@ -30,7 +31,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
   bool _showPassword = false;
   bool _showConfirmPassword = false;
   bool _isLoading = false;
-  bool _showBarangayModal = false;
   String? _selectedBarangay;
 
   // Validation errors
@@ -41,7 +41,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
   String? _barangayError;
   String? _streetDetailsError;
 
-  // Barangay options (Tanza 1 and Tanza 2 only)
+  // Barangay options
   final List<Map<String, String>> _barangays = [
     {'id': 'tanza1', 'name': 'Tanza 1', 'value': 'Tanza 1'},
     {'id': 'tanza2', 'name': 'Tanza 2', 'value': 'Tanza 2'},
@@ -67,7 +67,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
       isValid = false;
     }
 
-    // Barangay validation - ONLY Tanza 1 or Tanza 2
+    // Barangay validation
     if (_selectedBarangay == null || _selectedBarangay!.isEmpty) {
       errors['barangay'] = 'Please select your barangay';
       isValid = false;
@@ -128,7 +128,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
       );
       
       if (existingUser != null) {
-        // Email already registered
         _showErrorDialog(
           'Email Already Registered',
           'This email is already registered. Please use a different email or sign in.'
@@ -161,6 +160,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
       bool success = await MongoDatabase.insertUser(userData);
 
       if (success) {
+        // CRITICAL: Save user data to SharedPreferences BEFORE showing success dialog
+        await _saveUserDataToPreferences();
+        
         // Show success dialog
         _showSuccessDialog();
       } else {
@@ -168,6 +170,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
           'Registration Failed',
           'Failed to create account. Please try again.'
         );
+        setState(() {
+          _isLoading = false;
+        });
       }
     } catch (error) {
       print('Signup error: $error');
@@ -175,10 +180,47 @@ class _SignUpScreenState extends State<SignUpScreen> {
         'Registration Error',
         'An unexpected error occurred. Please try again.'
       );
-    } finally {
       setState(() {
         _isLoading = false;
       });
+    }
+  }
+
+  Future<void> _saveUserDataToPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+    
+      
+     
+      await prefs.setString('full_name', _nameController.text.trim());
+      await prefs.setString('email', _emailController.text.trim().toLowerCase());
+      await prefs.setString('phone_number', ''); 
+      await prefs.setString('region', '');
+      await prefs.setString('province', ''); 
+      await prefs.setString('city', ''); 
+      await prefs.setString('barangay', _selectedBarangay!.trim());
+      await prefs.setString('postal_code', ''); 
+      await prefs.setString('street_address', _streetDetailsController.text.trim());
+      await prefs.setString('emergency_contact_name', ''); 
+      await prefs.setString('emergency_contact_phone', ''); 
+      await prefs.setString('emergency_contact_relationship', ''); 
+      await prefs.setString('role', 'resident');
+      
+   
+      
+      print(' User data saved to SharedPreferences successfully!');
+      print('   Name: ${_nameController.text.trim()}');
+      print('   Email: ${_emailController.text.trim().toLowerCase()}');
+      print('   Barangay: ${_selectedBarangay!.trim()}');
+      print('   Street: ${_streetDetailsController.text.trim()}');
+      
+      
+      String? verifyName = prefs.getString('full_name');
+      String? verifyEmail = prefs.getString('email');
+      print('   Verification - Name: $verifyName, Email: $verifyEmail');
+      
+    } catch (error) {
+      print(' Error saving to SharedPreferences: $error');
     }
   }
 
@@ -212,24 +254,16 @@ class _SignUpScreenState extends State<SignUpScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(context); // Close dialog
-              // Clear form
-              _nameController.clear();
-              _emailController.clear();
-              _passwordController.clear();
-              _confirmPasswordController.clear();
-              _streetDetailsController.clear();
-              setState(() {
-                _selectedBarangay = null;
-              });
+              Navigator.pop(context);
               
-              // Navigate to login
+          
               if (widget.onSignUpSuccess != null) {
                 widget.onSignUpSuccess!();
               } else if (widget.onLoginPressed != null) {
                 widget.onLoginPressed!();
               } else {
-                Navigator.pop(context); 
+               
+                Navigator.pop(context);
               }
             },
             child: const Text(
@@ -243,6 +277,10 @@ class _SignUpScreenState extends State<SignUpScreen> {
   }
 
   void _showErrorDialog(String title, String message) {
+    setState(() {
+      _isLoading = false;
+    });
+    
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -262,7 +300,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
   }
 
   void _updateField(String field, String value) {
-    // Clear error when user starts typing
     setState(() {
       switch (field) {
         case 'name':
@@ -288,7 +325,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
     setState(() {
       _selectedBarangay = barangay;
       _barangayError = null;
-      _showBarangayModal = false;
     });
   }
 
@@ -349,7 +385,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
             child: Column(
               children: [
                 const SizedBox(height: 20),
-                // Form
                 Column(
                   children: [
                     // Name
