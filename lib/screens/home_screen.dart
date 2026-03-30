@@ -4,9 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import '../constants.dart';
 import '../screens/dashboard_screen.dart';
-import '../screens/report_emergency_screen.dart';
+import '../screens/report_emergency_screen.dart' hide SavedReportsScreen;
 import '../screens/evacuation_screen.dart';
 import '../screens/profile_screen.dart';
+ 
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -18,6 +19,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
   final PageController _pageController = PageController();
+
+
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +50,7 @@ class _HomeScreenState extends State<HomeScreen> {
           const ResourcesScreen(),
           const ReportEmergencyScreen(),
           const EvacuationScreen(),
-          const ProfileScreen(), // Placeholder
+          const ProfileScreen(), 
         ],
         onPageChanged: (page) {
           setState(() {
