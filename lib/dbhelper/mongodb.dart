@@ -92,6 +92,46 @@ class MongoDatabase {
     }
   }
 
+
+  static Future<bool> updateUser(String email, Map<String, dynamic> updatedData) async {
+    try {
+      print('Updating user with email: $email');
+      print('Data to update: $updatedData');
+      
+      
+      updatedData.remove('_id');
+      updatedData.remove('createdAt');
+      updatedData.remove('email');
+      updatedData.remove('password');
+      
+      
+      updatedData['updatedAt'] = DateTime.now().toIso8601String();
+      
+      // Create a modifier map for update
+      Map<String, dynamic> modifier = {
+        r'$set': updatedData
+      };
+      
+      // Perform the update
+      var result = await userCollection!.updateOne(
+        where.eq('email', email),
+        modifier,
+      );
+      
+      // Check if update was successful
+      if (result.isSuccess) {
+        print('User updated successfully: $email');
+        return true;
+      } else {
+        print('Failed to update user');
+        return false;
+      }
+    } catch (e) {
+      print('Error updating user: $e');
+      return false;
+    }
+  }
+
   static Future<void> close() async {
     if (db != null) {
       await db!.close();
