@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'dart:convert';
 import '../widgets/login.dart';
-import '../dbhelper/mongodb.dart'; 
+import '../dbhelper/mongodb.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback? onLoginSuccess;
@@ -24,13 +24,48 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: ['email', 'profile']);
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: ['email', 'profile'],
+  );
 
   bool _showPassword = false;
   bool _isLoading = false;
   String? _emailError;
   String? _passwordError;
-  String? _generalError; 
+  String? _generalError;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAutoLogin();
+  }
+
+  Future<void> _checkAutoLogin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      bool isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
+      
+      if (isLoggedIn) {
+        String? authProvider = prefs.getString('authProvider');
+        if (authProvider == 'google') {
+          bool isSignedIn = await _googleSignIn.isSignedIn();
+          if (isSignedIn) {
+            GoogleSignInAccount? googleUser = await _googleSignIn.signInSilently();
+            if (googleUser != null) {
+              print('Auto-login successful for: ${googleUser.email}');
+              if (widget.onLoginSuccess != null) {
+                widget.onLoginSuccess!();
+              } else {
+                Navigator.pushNamedAndRemoveUntil(context, '/home', (route) => false);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('Auto-login check error: $e');
+    }
+  }
 
   bool _validateForm() {
     setState(() {
@@ -72,14 +107,12 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-   
       var user = await MongoDatabase.findUserForLogin(
         _emailController.text.trim().toLowerCase(),
         _passwordController.text,
       );
 
       if (user != null) {
-   
         print('User logged in: ${user['email']}');
 
         final userData = {
@@ -91,19 +124,18 @@ class _LoginScreenState extends State<LoginScreen> {
           'streetDetails': user['streetDetails'] ?? '',
           'isSafe': true,
           'role': user['role'] ?? 'user',
+          'authProvider': 'email',
         };
 
-    
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('userData', jsonEncode(userData));
         await prefs.setBool('isLoggedIn', true);
         await prefs.setString('userEmail', user['email']);
         await prefs.setString('userName', user['name']);
+        await prefs.setString('authProvider', 'email');
 
-       
         _showSuccessDialog(user['name'] ?? 'User');
       } else {
-
         setState(() {
           _generalError = 'Invalid email or password. Please try again.';
         });
@@ -133,7 +165,7 @@ class _LoginScreenState extends State<LoginScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(context); 
+              Navigator.pop(context);
               if (widget.onLoginSuccess != null) {
                 widget.onLoginSuccess!();
               } else {
@@ -166,23 +198,53 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
-
-      if (googleUser == null) {
-        
+      // Check if Google Play Services are available
+      try {
+        await _googleSignIn.isSignedIn();
+      } catch (e) {
+        print('Google Play Services check failed: $e');
+        setState(() {
+          _generalError = 'Please update Google Play Services on your device';
+        });
         setState(() {
           _isLoading = false;
         });
         return;
       }
 
+      // Sign out first to ensure fresh login
+      try {
+        await _googleSignIn.signOut();
+      } catch (e) {
+        print('Sign out error (ignored): $e');
+      }
 
+      // Attempt sign in
+      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
+
+      if (googleUser == null) {
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+
+      // Get authentication details
+      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+
+      print('✅ Google Sign-In successful!');
+      print('   Email: ${googleUser.email}');
+      print('   Name: ${googleUser.displayName}');
+      print('   Photo: ${googleUser.photoUrl}');
+
+      // Check if user already exists in MongoDB
       var existingUser = await MongoDatabase.findUserByEmail(googleUser.email.toLowerCase());
-      
+
       Map<String, dynamic> userData;
-      
+
       if (existingUser != null) {
-   
+        print('📱 Existing user found: ${existingUser['email']}');
+        
         userData = {
           'id': existingUser['_id'].toString(),
           'name': existingUser['name'] ?? googleUser.displayName,
@@ -193,57 +255,103 @@ class _LoginScreenState extends State<LoginScreen> {
           'isSafe': true,
           'role': existingUser['role'] ?? 'user',
           'photoUrl': googleUser.photoUrl,
+          'authProvider': 'google',
         };
+        
+        // Update last login time
+        await MongoDatabase.updateUser(googleUser.email.toLowerCase(), {
+          'lastLogin': DateTime.now().toIso8601String(),
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
       } else {
-    
+        print('🆕 Creating new user for: ${googleUser.email}');
+        
         Map<String, dynamic> newUser = {
           'name': googleUser.displayName ?? 'Google User',
           'email': googleUser.email.toLowerCase(),
-          'password': 'google_auth_' + DateTime.now().millisecondsSinceEpoch.toString(),
+          'password': 'google_auth_${DateTime.now().millisecondsSinceEpoch}',
           'isActive': true,
           'role': 'user',
           'authProvider': 'google',
           'createdAt': DateTime.now().toIso8601String(),
+          'updatedAt': DateTime.now().toIso8601String(),
+          'lastLogin': DateTime.now().toIso8601String(),
           'emailVerified': true,
+          'phoneNumber': '',
+          'region': '',
+          'province': '',
+          'city': '',
+          'barangay': '',
+          'postalCode': '',
+          'streetDetails': '',
+          'address': '',
+          'emergencyContactName': '',
+          'emergencyContactPhone': '',
+          'emergencyContactRelationship': '',
+          'profilePhoto': googleUser.photoUrl ?? '',
         };
-        
+
         bool created = await MongoDatabase.insertUser(newUser);
-        
+
         if (created) {
-          // Fetch the newly created user
           var createdUser = await MongoDatabase.findUserByEmail(googleUser.email.toLowerCase());
           userData = {
             'id': createdUser!['_id'].toString(),
             'name': createdUser['name'],
             'email': createdUser['email'],
-            'address': '',
-            'barangay': '',
-            'streetDetails': '',
+            'address': createdUser['address'] ?? '',
+            'barangay': createdUser['barangay'] ?? '',
+            'streetDetails': createdUser['streetDetails'] ?? '',
             'isSafe': true,
-            'role': 'user',
+            'role': createdUser['role'] ?? 'user',
             'photoUrl': googleUser.photoUrl,
+            'authProvider': 'google',
           };
         } else {
-          throw Exception('Failed to create user');
+          throw Exception('Failed to create user account');
         }
       }
 
-  
+      // Save user data to SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('userData', jsonEncode(userData));
       await prefs.setBool('isLoggedIn', true);
       await prefs.setString('userEmail', userData['email']);
       await prefs.setString('userName', userData['name']);
+      await prefs.setString('authProvider', 'google');
+      
+      if (googleUser.photoUrl != null) {
+        await prefs.setString('profile_image', googleUser.photoUrl!);
+      }
 
+      print('✅ User data saved to SharedPreferences');
+
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Welcome, ${userData['name']}!'),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+
+      // Navigate to home screen
       if (widget.onLoginSuccess != null) {
         widget.onLoginSuccess!();
       } else {
         Navigator.pushNamedAndRemoveUntil(context, '/home', (route) => false);
       }
     } catch (error) {
-      print('Google sign-in error: $error');
+      print('❌ Google sign-in error: $error');
       setState(() {
-        _generalError = 'Google sign-in failed. Please try again.';
+        if (error.toString().contains('sign_in_failed')) {
+          _generalError = 'Google Sign-In failed. Please make sure:\n'
+              '1. You have internet connection\n'
+              '2. Google Play Services is updated\n'
+              '3. Your Google account is valid';
+        } else {
+          _generalError = 'Google sign-in failed: ${error.toString().split('\n')[0]}';
+        }
       });
     } finally {
       setState(() {
@@ -256,7 +364,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (_emailController.text.trim().isEmpty) {
       _showMessageDialog(
         'Forgot Password',
-        'Please enter your email address first, then tap "Forgot Password" again.',
+        'Please enter your email address first.',
       );
       return;
     }
@@ -266,15 +374,13 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      
       var user = await MongoDatabase.findUserByEmail(_emailController.text.trim().toLowerCase());
-      
+
       if (user != null) {
         _showConfirmDialog(
           'Reset Password',
           'A password reset link will be sent to ${_emailController.text.trim()}.',
           onConfirm: () {
- 
             _showMessageDialog(
               'Success',
               'Password reset link sent! Check your email.',
@@ -357,7 +463,7 @@ class _LoginScreenState extends State<LoginScreen> {
       } else if (fieldType == 'password') {
         _passwordError = null;
       }
-      _generalError = null; 
+      _generalError = null;
     });
   }
 
@@ -391,7 +497,6 @@ class _LoginScreenState extends State<LoginScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                 
                     if (_generalError != null)
                       Container(
                         padding: const EdgeInsets.all(12),
