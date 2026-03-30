@@ -3,8 +3,10 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 import '../widgets/profile.dart';
+import '../dbhelper/mongodb.dart';
 
 class UserProfile {
+  String? id;
   String? fullName;
   String? email;
   String? phoneNumber;
@@ -20,6 +22,7 @@ class UserProfile {
   String role;
 
   UserProfile({
+    this.id,
     this.fullName,
     this.email,
     this.phoneNumber,
@@ -37,6 +40,7 @@ class UserProfile {
 
   UserProfile copy() {
     return UserProfile(
+      id: id,
       fullName: fullName,
       email: email,
       phoneNumber: phoneNumber,
@@ -68,8 +72,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _profileImage;
   bool _isUploading = false;
   bool _showEmergencyModal = false;
-  bool _isLoading = false;
+  bool _isLoading = true;
   final ImagePicker _picker = ImagePicker();
+  String? _userEmail;
 
   late TextEditingController _nameController;
   late TextEditingController _phoneController;
@@ -82,39 +87,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TextEditingController _emergencyNameController;
   late TextEditingController _emergencyPhoneController;
   late TextEditingController _emergencyRelationshipController;
-
-  final List<Map<String, dynamic>> bottomNavItems = [
-    {
-      'id': 'home',
-      'label': 'Home',
-      'icon': Icons.home_outlined,
-      'iconActive': Icons.home,
-    },
-    {
-      'id': 'safety',
-      'label': 'Safety Tips',
-      'icon': Icons.security_outlined,
-      'iconActive': Icons.security,
-    },
-    {
-      'id': 'evac',
-      'label': 'Evac Map',
-      'icon': Icons.map_outlined,
-      'iconActive': Icons.map,
-    },
-    {
-      'id': 'resources',
-      'label': 'Resources',
-      'icon': Icons.inventory_outlined,
-      'iconActive': Icons.inventory,
-    },
-    {
-      'id': 'profile',
-      'label': 'Profile',
-      'icon': Icons.person_outline,
-      'iconActive': Icons.person,
-    },
-  ];
 
   @override
   void initState() {
@@ -169,38 +141,99 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _loadUserProfile() async {
+    setState(() {
+      _isLoading = true;
+    });
+    
     try {
       final prefs = await SharedPreferences.getInstance();
-      await Future.delayed(const Duration(seconds: 1));
-
-      setState(() {
-        _profile = UserProfile(
-          fullName: prefs.getString('full_name') ?? 'John Doe',
-          email: prefs.getString('email') ?? 'user@example.com',
-          phoneNumber: prefs.getString('phone_number'),
-          region: prefs.getString('region'),
-          province: prefs.getString('province'),
-          city: prefs.getString('city'),
-          barangay: prefs.getString('barangay'),
-          postalCode: prefs.getString('postal_code'),
-          streetAddress: prefs.getString('street_address'),
-          emergencyContactName: prefs.getString('emergency_contact_name'),
-          emergencyContactPhone: prefs.getString('emergency_contact_phone'),
-          emergencyContactRelationship: prefs.getString(
-            'emergency_contact_relationship',
-          ),
-          role: 'resident',
-        );
-
-        _editedProfile = _profile.copy();
-        _updateControllersFromProfile();
-        _isLoading = false;
-      });
+      
+      
+      _userEmail = prefs.getString('userEmail');  
+      
+      if (_userEmail == null || _userEmail!.isEmpty) {
+        print('No logged in user found');
+        setState(() {
+          _isLoading = false;
+        });
+        _showAlert('Error', 'Please login first');
+        return;
+      }
+      
+      print('Loading profile for email: $_userEmail');
+      
+      // Fetch user data from MongoDB
+      var userData = await MongoDatabase.findUserByEmail(_userEmail!);
+      
+      if (userData != null) {
+        print('User data found: ${userData['email']}');
+        
+        // Extract data from MongoDB document
+        String fullName = userData['name'] ?? '';
+        String email = userData['email'] ?? '';
+        String barangay = userData['barangay'] ?? '';
+        String streetDetails = userData['streetDetails'] ?? '';
+        String role = userData['role'] ?? 'resident';
+        
+        setState(() {
+          _profile = UserProfile(
+            id: userData['_id']?.toString(),
+            fullName: fullName,
+            email: email,
+            phoneNumber: userData['phoneNumber'] ?? '',
+            region: userData['region'] ?? '',
+            province: userData['province'] ?? '',
+            city: userData['city'] ?? '',
+            barangay: barangay,
+            postalCode: userData['postalCode'] ?? '',
+            streetAddress: streetDetails,
+            emergencyContactName: userData['emergencyContactName'] ?? '',
+            emergencyContactPhone: userData['emergencyContactPhone'] ?? '',
+            emergencyContactRelationship: userData['emergencyContactRelationship'] ?? '',
+            role: role,
+          );
+          
+          // Also save to SharedPreferences for offline access
+          _saveProfileToPreferences();
+          
+          _editedProfile = _profile.copy();
+          _updateControllersFromProfile();
+          _isLoading = false;
+        });
+      } else {
+        print('No user data found in MongoDB for email: $_userEmail');
+        setState(() {
+          _isLoading = false;
+        });
+        _showAlert('Error', 'User data not found');
+      }
     } catch (error) {
       print('Error loading profile: $error');
       setState(() {
         _isLoading = false;
       });
+      _showAlert('Error', 'Failed to load profile data');
+    }
+  }
+  
+  Future<void> _saveProfileToPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('full_name', _profile.fullName ?? '');
+      await prefs.setString('email', _profile.email ?? '');
+      await prefs.setString('phone_number', _profile.phoneNumber ?? '');
+      await prefs.setString('region', _profile.region ?? '');
+      await prefs.setString('province', _profile.province ?? '');
+      await prefs.setString('city', _profile.city ?? '');
+      await prefs.setString('barangay', _profile.barangay ?? '');
+      await prefs.setString('postal_code', _profile.postalCode ?? '');
+      await prefs.setString('street_address', _profile.streetAddress ?? '');
+      await prefs.setString('emergency_contact_name', _profile.emergencyContactName ?? '');
+      await prefs.setString('emergency_contact_phone', _profile.emergencyContactPhone ?? '');
+      await prefs.setString('emergency_contact_relationship', _profile.emergencyContactRelationship ?? '');
+      await prefs.setString('role', _profile.role);
+    } catch (error) {
+      print('Error saving to preferences: $error');
     }
   }
 
@@ -239,14 +272,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _isUploading = true;
     });
 
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('profile_image', imagePath);
+      
+      setState(() {
+        _profileImage = imagePath;
+        _isUploading = false;
+      });
 
-    setState(() {
-      _profileImage = imagePath;
-      _isUploading = false;
-    });
-
-    _showAlert('Success', 'Profile image updated successfully');
+      _showAlert('Success', 'Profile image updated successfully');
+    } catch (error) {
+      setState(() {
+        _isUploading = false;
+      });
+      _showAlert('Error', 'Failed to update profile image');
+    }
   }
 
   void _handleEdit() {
@@ -267,43 +308,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _isLoading = true;
     });
 
-    await Future.delayed(const Duration(seconds: 1));
-
     try {
-      final prefs = await SharedPreferences.getInstance();
-
-      await prefs.setString('full_name', _editedProfile.fullName ?? '');
-      await prefs.setString('phone_number', _editedProfile.phoneNumber ?? '');
-      await prefs.setString('region', _editedProfile.region ?? '');
-      await prefs.setString('province', _editedProfile.province ?? '');
-      await prefs.setString('city', _editedProfile.city ?? '');
-      await prefs.setString('barangay', _editedProfile.barangay ?? '');
-      await prefs.setString('postal_code', _editedProfile.postalCode ?? '');
-      await prefs.setString(
-        'street_address',
-        _editedProfile.streetAddress ?? '',
-      );
-      await prefs.setString(
-        'emergency_contact_name',
-        _editedProfile.emergencyContactName ?? '',
-      );
-      await prefs.setString(
-        'emergency_contact_phone',
-        _editedProfile.emergencyContactPhone ?? '',
-      );
-      await prefs.setString(
-        'emergency_contact_relationship',
-        _editedProfile.emergencyContactRelationship ?? '',
-      );
-
-      setState(() {
-        _profile = _editedProfile.copy();
-        _isEditing = false;
-        _isLoading = false;
-      });
-
-      _showAlert('Success', 'Profile updated successfully');
+      // data for mongodb
+      Map<String, dynamic> updatedData = {
+        'name': _editedProfile.fullName,
+        'phoneNumber': _editedProfile.phoneNumber ?? '',
+        'region': _editedProfile.region ?? '',
+        'province': _editedProfile.province ?? '',
+        'city': _editedProfile.city ?? '',
+        'barangay': _editedProfile.barangay ?? '',
+        'postalCode': _editedProfile.postalCode ?? '',
+        'streetDetails': _editedProfile.streetAddress ?? '',
+        'address': '${_editedProfile.streetAddress ?? ''}, ${_editedProfile.barangay ?? ''}',
+        'emergencyContactName': _editedProfile.emergencyContactName ?? '',
+        'emergencyContactPhone': _editedProfile.emergencyContactPhone ?? '',
+        'emergencyContactRelationship': _editedProfile.emergencyContactRelationship ?? '',
+      };
+      
+      // Update user in MongoDB
+      bool success = await MongoDatabase.updateUser(_userEmail!, updatedData);
+      
+      if (success) {
+        // Update local profile
+        setState(() {
+          _profile = _editedProfile.copy();
+          _isEditing = false;
+          _isLoading = false;
+        });
+        
+        // Update SharedPreferences
+        await _saveProfileToPreferences();
+        
+        _showAlert('Success', 'Profile updated successfully');
+      } else {
+        throw Exception('Failed to update profile');
+      }
     } catch (error) {
+      print('Error saving profile: $error');
       setState(() {
         _isLoading = false;
       });
@@ -428,7 +469,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
-                  // Profile header: image left, name/email right
+                  // Profile header
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -487,9 +528,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   child: Text(
                                     _profile.fullName
                                             ?.split(' ')
-                                            .map(
-                                              (n) => n.isNotEmpty ? n[0] : '',
-                                            )
+                                            .map((n) => n.isNotEmpty ? n[0] : '')
                                             .join('')
                                             .toUpperCase() ??
                                         'U',
@@ -594,7 +633,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           ],
                         ),
                       ),
-                      // Edit Button on the right
                       IconButton(
                         onPressed: _isEditing ? _handleSave : _handleEdit,
                         icon: Icon(
