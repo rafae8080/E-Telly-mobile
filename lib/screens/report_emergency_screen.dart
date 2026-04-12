@@ -1,10 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../widgets/custom_font.dart';
 import '../widgets/report.dart';
-import '../services/offline_report_storage.dart';
+import '../dbhelper/mongodb.dart';
+
+// Update UserData class to include email
+class UserData {
+  final String? fullName;
+  final String? email;
+  final String? address;
+  final String? phoneNumber;
+  
+  UserData({
+    this.fullName,
+    this.email,
+    this.address,
+    this.phoneNumber,
+  });
+}
 
 class ReportEmergencyScreen extends StatefulWidget {
   final VoidCallback? onBackPressed;
@@ -17,7 +33,7 @@ class ReportEmergencyScreen extends StatefulWidget {
 
 class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   String? _emergencyType;
-  int _severity = 2;
+  String _severity = 'Medium'; 
   bool _isSubmitting = false;
   UserData _userData = UserData();
   bool _loading = true;
@@ -25,9 +41,17 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   bool _showAdditionalInfo = false;
   final ImagePicker _picker = ImagePicker();
   final TextEditingController _descriptionController = TextEditingController();
-
-  bool _hasInternet = true;
-  bool _isCheckingInternet = true;
+  
+  // Location variables
+  Position? _currentPosition;
+  bool _isLoadingLocation = false;
+  String? _locationError;
+  String _exactAddress = '';
+  String _street = '';
+  String _barangay = '';
+  String _city = '';
+  String _province = '';
+  String _postalCode = '';
   
   final List<EmergencyType> _emergencyTypes = [
     EmergencyType(
@@ -35,12 +59,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
       title: 'Flood',
       icon: Icons.flood,
       typeColor: const Color(0xFF06B6D4),
-    ),
-    EmergencyType(
-      id: 'storm-surge',
-      title: 'Storm Surge',
-      icon: Icons.water,
-      typeColor: const Color(0xFF0EA5E9),
     ),
     EmergencyType(
       id: 'rescue',
@@ -53,12 +71,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
       title: 'Medical',
       icon: Icons.medical_services,
       typeColor: const Color(0xFFDC2626),
-    ),
-    EmergencyType(
-      id: 'typhoon',
-      title: 'Typhoon',
-      icon: Icons.cloud,
-      typeColor: const Color(0xFF3B82F6),
     ),
     EmergencyType(
       id: 'earthquake',
@@ -86,29 +98,24 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     ),
   ];
 
+  // Added Severity Levels
   final List<SeverityLevel> _severityLevels = [
     SeverityLevel(
-      level: 1,
+      level: 'Low',
       label: 'Low',
       description: 'Minor issue, no immediate danger',
       color: const Color(0xFF10B981),
     ),
     SeverityLevel(
-      level: 2,
+      level: 'Medium',
       label: 'Medium',
       description: 'Significant issue, monitor closely',
       color: const Color(0xFFF59E0B),
     ),
     SeverityLevel(
-      level: 3,
+      level: 'High',
       label: 'High',
       description: 'Urgent, immediate action needed',
-      color: const Color(0xFFDC2626),
-    ),
-    SeverityLevel(
-      level: 4,
-      label: 'Critical',
-      description: 'Life-threatening, immediate response',
       color: const Color(0xFFDC2626),
     ),
   ];
@@ -117,7 +124,8 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   void initState() {
     super.initState();
     _loadUserData();
-    _CheckInternetConnection();
+    _connectToMongoDB();
+    _getCurrentLocation();
   }
 
   @override
@@ -126,12 +134,110 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     super.dispose();
   }
 
+  Future<void> _connectToMongoDB() async {
+    try {
+      await MongoDatabase.connect();
+      print('MongoDB connection initialized');
+    } catch (e) {
+      print('Error connecting to MongoDB: $e');
+    }
+  }
+
+  // Get severity color
+  Color getSeverityColor(String severity) {
+    switch (severity) {
+      case 'Low': return const Color(0xFF10B981);
+      case 'Medium': return const Color(0xFFF59E0B);
+      case 'High': return const Color(0xFFDC2626);
+      default: return const Color(0xFFF59E0B);
+    }
+  }
+
+  // Request location permission and get current location with exact address
+  Future<void> _getCurrentLocation() async {
+    setState(() {
+      _isLoadingLocation = true;
+      _locationError = null;
+    });
+
+    try {
+      PermissionStatus permission = await Permission.location.request();
+      
+      if (permission.isGranted) {
+        bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (!serviceEnabled) {
+          setState(() {
+            _locationError = 'Location services are disabled. Please enable GPS.';
+            _isLoadingLocation = false;
+          });
+          return;
+        }
+        
+        Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 15),
+        );
+        
+        setState(() {
+          _currentPosition = position;
+        });
+        
+        print('Location obtained: ${position.latitude}, ${position.longitude}');
+        
+        await _getExactAddress(position.latitude, position.longitude);
+        
+        setState(() {
+          _isLoadingLocation = false;
+        });
+        
+      } else if (permission.isDenied) {
+        setState(() {
+          _locationError = 'Location permission denied. Please enable location access.';
+          _isLoadingLocation = false;
+        });
+      } else if (permission.isPermanentlyDenied) {
+        setState(() {
+          _locationError = 'Location permission permanently denied. Please enable from settings.';
+          _isLoadingLocation = false;
+        });
+        openAppSettings();
+      }
+    } catch (e) {
+      setState(() {
+        _locationError = 'Error getting location: $e';
+        _isLoadingLocation = false;
+      });
+      print('Error getting location: $e');
+    }
+  }
+
+  // Get exact address from coordinates
+  Future<void> _getExactAddress(double latitude, double longitude) async {
+    try {
+      setState(() {
+        _exactAddress = '${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}';
+        _street = '';
+        _barangay = '';
+        _city = '';
+        _province = '';
+        _postalCode = '';
+      });
+      print('Exact address fallback: $_exactAddress');
+    } catch (e) {
+      print('Error getting exact address: $e');
+      setState(() {
+        _exactAddress = '${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}';
+      });
+    }
+  }
+
   Future<void> _loadUserData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       setState(() {
         _userData = UserData(
           fullName: prefs.getString('full_name'),
+          email: prefs.getString('email'),
           address: prefs.getString('address'),
           phoneNumber: prefs.getString('phone_number'),
         );
@@ -140,53 +246,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     } catch (error) {
       setState(() => _loading = false);
     }
-  }
-
-  // ADDED: Check internet connection
-  Future<void> _CheckInternetConnection() async {
-    setState(() => _isCheckingInternet = true);
-    
-    final connectivityResult = await Connectivity().checkConnectivity();
-    setState(() {
-      _hasInternet = connectivityResult != ConnectivityResult.none;
-      _isCheckingInternet = false;
-    });
-    
-    // Listen to connectivity changes
-    Connectivity().onConnectivityChanged.listen((result) {
-      setState(() {
-        _hasInternet = result != ConnectivityResult.none;
-      });
-      
-      // If internet comes back, try to sync pending reports
-      if (_hasInternet) {
-        _syncPendingReports();
-      }
-    });
-  }
-
-  // ADDED: Sync pending reports
-  Future<void> _syncPendingReports() async {
-    final pendingCount = OfflineReportStorage.getPendingSyncCount();
-    if (pendingCount > 0 && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Syncing $pendingCount pending reports...'),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-      await OfflineReportStorage.syncReportsToServer();
-    }
-  }
-
-  // ADDED: View saved reports
-  void _viewSavedReports() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => const SavedReportsScreen(),
-      ),
-    );
   }
 
   Future<void> _pickImage() async {
@@ -232,58 +291,60 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   void _resetForm() {
     setState(() {
       _emergencyType = null;
-      _severity = 2;
+      _severity = 'Medium';
       _images.clear();
       _showAdditionalInfo = false;
       _descriptionController.clear();
     });
   }
 
-  // MODIFIED: Handle submit with offline support
   Future<void> _handleSubmit() async {
     if (_emergencyType == null) {
       _showAlert('Error', 'Please select an emergency type');
       return;
     }
     
+    if (_currentPosition == null && !_isLoadingLocation) {
+      _showAlert('Location Error', 'Unable to get your location. Please enable GPS and try again.');
+      return;
+    }
+    
     setState(() => _isSubmitting = true);
     
     try {
-      // Create report object
       final report = {
         'id': DateTime.now().millisecondsSinceEpoch.toString(),
         'emergencyType': _emergencyType,
         'severity': _severity,
-        'severityLabel': _severityLevels.firstWhere(
-          (s) => s.level == _severity,
-          orElse: () => _severityLevels[1],
-        ).label,
         'description': _descriptionController.text,
         'images': List<String>.from(_images),
         'userData': {
           'fullName': _userData.fullName,
-          'address': _userData.address,
+          'email': _userData.email,
+          'address': _userData.address ?? _exactAddress,
           'phoneNumber': _userData.phoneNumber,
+        },
+        'location': {
+          'type': 'Point',
+          'coordinates': [
+            _currentPosition?.longitude ?? 0.0,
+            _currentPosition?.latitude ?? 0.0,
+          ],
+          'latitude': _currentPosition?.latitude,
+          'longitude': _currentPosition?.longitude,
+          'exactAddress': _exactAddress,
+          'street': _street,
+          'barangay': _barangay,
+          'city': _city,
+          'province': _province,
+          'postalCode': _postalCode,
         },
         'timestamp': DateTime.now().toIso8601String(),
         'date': DateTime.now().toString(),
-        'synced': false,
-        'hasInternet': _hasInternet,
       };
       
-      // Save to offline storage
-      await OfflineReportStorage.saveReport(report);
-      
-      // Show appropriate success message
-      if (!_hasInternet) {
-        _showOfflineSuccessDialog();
-      } else {
-        // If online, try to send immediately
-        await _sendToServer(report);
-        _showSuccessDialog();
-      }
-      
-      // Reset form after successful save
+      await _sendToServer(report);
+      _showSuccessDialog();
       _resetForm();
       
     } catch (e) {
@@ -293,75 +354,25 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     }
   }
 
-  // ADDED: Send to server (placeholder - implement your actual API call)
   Future<void> _sendToServer(Map<String, dynamic> report) async {
-    // TODO: Implement your actual API call to MongoDB/backend
-    // This is a placeholder - replace with your actual server logic
-    print('Sending report to server: $report');
-    
-    // Simulate API call
-    await Future.delayed(const Duration(seconds: 1));
-    
-    // Mark as synced if successful
-    // In real implementation, you'd update the report in Hive
-    // You can implement this in your sync method
+    try {
+      if (MongoDatabase.db == null) {
+        await MongoDatabase.connect();
+      }
+      
+      bool success = await MongoDatabase.saveEmergencyReport(report);
+      
+      if (!success) {
+        throw Exception('Failed to save report to database');
+      }
+      
+      print('Report successfully saved to MongoDB');
+    } catch (e) {
+      print('Error sending to server: $e');
+      rethrow;
+    }
   }
 
-  // ADDED: Show offline success dialog
-  void _showOfflineSuccessDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.save, color: Colors.orange),
-            SizedBox(width: 10),
-            Text('Saved Offline'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '⚠️ You are currently offline.',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Your emergency report has been saved locally. '
-              'It will be automatically submitted when you reconnect to the internet.',
-            ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.all(10),
-              color: Colors.orange.shade50,
-              child: const Text(
-                '💡 Tip: Enable internet connection to submit immediately.',
-                style: TextStyle(fontSize: 12),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _viewSavedReports();
-              },
-              child: const Text('View Saved Reports'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ADDED: Show online success dialog
   void _showSuccessDialog() {
     showDialog(
       context: context,
@@ -373,9 +384,67 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
             Text('Report Submitted!'),
           ],
         ),
-        content: const Text(
-          'Your emergency report has been submitted successfully. '
-          'Authorities will be notified immediately.',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Your emergency report has been submitted successfully.',
+            ),
+            const SizedBox(height: 12),
+            if (_currentPosition != null && _exactAddress.isNotEmpty) ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade200),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '📍 EXACT LOCATION:',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.blue),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      _exactAddress,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Coordinates: ${_currentPosition!.latitude.toStringAsFixed(6)}, ${_currentPosition!.longitude.toStringAsFixed(6)}',
+                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: getSeverityColor(_severity).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: getSeverityColor(_severity).withOpacity(0.3)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.warning, color: getSeverityColor(_severity), size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Severity Level: $_severity',
+                    style: TextStyle(
+                      fontSize: 13, 
+                      fontWeight: FontWeight.bold,
+                      color: getSeverityColor(_severity),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -392,67 +461,92 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     );
   }
 
-  // ADDED: Build offline warning banner
-  Widget _buildOfflineWarning() {
-    if (_hasInternet) return const SizedBox.shrink();
-    
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.orange.shade100,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.orange),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.wifi_off, color: Colors.orange),
-          const SizedBox(width: 10),
-          Expanded(
-            child: const Text(
-              'You are offline. Reports will be saved and submitted when internet is restored.',
-              style: TextStyle(fontSize: 12),
+  // Widget to show location status
+  Widget _buildLocationStatus() {
+    if (_isLoadingLocation) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.blue.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
-          ),
-          TextButton(
-            onPressed: _viewSavedReports,
-            child: const Text('View Pending'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ADDED: Build pending reports indicator
-  Widget _buildPendingReportsIndicator() {
-    final pendingCount = OfflineReportStorage.getPendingSyncCount();
-    if (pendingCount == 0) return const SizedBox.shrink();
-    
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.blue.shade50,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.blue),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.pending, color: Colors.blue),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '$pendingCount report(s) pending sync. They will be submitted when online.',
-              style: const TextStyle(fontSize: 12),
+            SizedBox(width: 10),
+            Text('Getting your location...'),
+          ],
+        ),
+      );
+    } else if (_locationError != null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.location_off, size: 18, color: Colors.red),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _locationError!,
+                style: const TextStyle(fontSize: 12, color: Colors.red),
+              ),
             ),
-          ),
-          TextButton(
-            onPressed: _viewSavedReports,
-            child: const Text('View'),
-          ),
-        ],
-      ),
-    );
+            TextButton(
+              onPressed: _getCurrentLocation,
+              style: TextButton.styleFrom(padding: EdgeInsets.zero),
+              child: const Text('Retry', style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+      );
+    } else if (_currentPosition != null && _exactAddress.isNotEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.green.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.green.withOpacity(0.3)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.location_on, size: 18, color: Colors.green),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Your Location:',
+                    style: TextStyle(fontSize: 10, color: Colors.grey),
+                  ),
+                  Text(
+                    _exactAddress,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh, size: 18),
+              onPressed: _getCurrentLocation,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          ],
+        ),
+      );
+    }
+    return const SizedBox.shrink();
   }
 
   Widget _buildEmergencyTypeGrid() {
@@ -505,6 +599,7 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     );
   }
 
+  // Build Severity Grid
   Widget _buildSeverityGrid() {
     return Column(
       children: _severityLevels.map((level) {
@@ -524,7 +619,10 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
             ),
             child: Row(
               children: [
-                CircleAvatar(backgroundColor: level.color, radius: 8),
+                CircleAvatar(
+                  backgroundColor: level.color, 
+                  radius: 8,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -613,10 +711,21 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
           SummaryRow(
             label: 'Location:',
             value: Expanded(
-              child: Text(
-                _userData.address ?? 'Current Location',
-                textAlign: TextAlign.right,
-                style: const TextStyle(fontSize: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    _exactAddress.isNotEmpty ? _exactAddress : (_userData.address ?? 'Getting location...'),
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  if (_currentPosition != null)
+                    Text(
+                      'GPS: ${_currentPosition!.latitude.toStringAsFixed(4)}, ${_currentPosition!.longitude.toStringAsFixed(4)}',
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                ],
               ),
             ),
           ),
@@ -685,12 +794,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ADDED: Offline warning banner
-            if (!_isCheckingInternet) _buildOfflineWarning(),
-            
-            // ADDED: Pending reports indicator
-            if (!_isCheckingInternet) _buildPendingReportsIndicator(),
-            
             const Padding(
               padding: EdgeInsets.only(left: 4, top: 4),
               child: CustomFont(
@@ -701,10 +804,12 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
               ),
             ),
             const SizedBox(height: 6),
+            
+            _buildLocationStatus(),
+            const SizedBox(height: 12),
       
             _buildEmergencyTypeGrid(),
       
-            // Disclaimer - show here only when no emergency type is selected
             if (_emergencyType == null) ...[
               const SizedBox(height: 16),
               _buildDisclaimer(),
@@ -784,24 +889,22 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
                 child: ElevatedButton(
                   onPressed: _isSubmitting ? null : _handleSubmit,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _hasInternet 
-                        ? const Color(0xFFDC2626) 
-                        : Colors.orange,
+                    backgroundColor: const Color(0xFFDC2626),
                   ),
                   child: _isSubmitting
                       ? const CircularProgressIndicator(color: Colors.white)
-                      : Row(
+                      : const Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
-                              _hasInternet ? Icons.send : Icons.save,
+                              Icons.send,
                               color: Colors.white,
                               size: 18,
                             ),
-                            const SizedBox(width: 8),
+                            SizedBox(width: 8),
                             Text(
-                              _hasInternet ? 'SUBMIT REPORT' : 'SAVE OFFLINE',
-                              style: const TextStyle(
+                              'SUBMIT REPORT',
+                              style: TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -810,203 +913,12 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
                         ),
                 ),
               ),
-              // Disclaimer - show at bottom when emergency type is selected
               const SizedBox(height: 16),
               _buildDisclaimer(),
               const SizedBox(height: 20),
             ],
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ADDED: Saved Reports Screen
-class SavedReportsScreen extends StatelessWidget {
-  const SavedReportsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final reports = OfflineReportStorage.getAllReports();
-    final unsyncedCount = OfflineReportStorage.getPendingSyncCount();
-    
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Saved Reports'),
-        backgroundColor: const Color(0xFFDC2626),
-        actions: [
-          if (unsyncedCount > 0)
-            IconButton(
-              icon: const Icon(Icons.sync),
-              onPressed: () async {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Syncing reports...')),
-                );
-                await OfflineReportStorage.syncReportsToServer();
-                // Refresh the screen
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const SavedReportsScreen(),
-                  ),
-                );
-              },
-            ),
-          IconButton(
-            icon: const Icon(Icons.delete_sweep),
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('Clear All Reports'),
-                  content: const Text('Are you sure you want to delete all saved reports?'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Cancel'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('Delete'),
-                    ),
-                  ],
-                ),
-              );
-              
-              if (confirm == true) {
-                await OfflineReportStorage.clearAllReports();
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('All reports cleared')),
-                );
-              }
-            },
-          ),
-        ],
-      ),
-      body: reports.isEmpty
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.folder, size: 64, color: Colors.grey),
-                  SizedBox(height: 16),
-                  Text(
-                    'No saved reports',
-                    style: TextStyle(fontSize: 18, color: Colors.grey),
-                  ),
-                ],
-              ),
-            )
-          : ListView.builder(
-              itemCount: reports.length,
-              itemBuilder: (context, index) {
-                final report = reports[index];
-                final isSynced = report['synced'] == true;
-                
-                return Card(
-                  margin: const EdgeInsets.all(8),
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: isSynced ? Colors.green : Colors.orange,
-                      child: Icon(
-                        isSynced ? Icons.check : Icons.pending,
-                        color: Colors.white,
-                      ),
-                    ),
-                    title: Text(
-                      _getEmergencyTypeTitle(report['emergencyType']),
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Severity: ${report['severityLabel']}'),
-                        Text(
-                          'Date: ${DateTime.parse(report['timestamp']).toLocal()}',
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        if (!isSynced)
-                          const Text(
-                            '⚠️ Pending Sync',
-                            style: TextStyle(color: Colors.orange, fontSize: 12),
-                          ),
-                      ],
-                    ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () async {
-                        await OfflineReportStorage.deleteReport(index);
-                        // Refresh
-                        Navigator.pop(context);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const SavedReportsScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                    onTap: () {
-                      _showReportDetails(context, report);
-                    },
-                  ),
-                );
-              },
-            ),
-    );
-  }
-  
-  String _getEmergencyTypeTitle(String? id) {
-    switch (id) {
-      case 'flood': return 'Flood';
-      case 'storm-surge': return 'Storm Surge';
-      case 'rescue': return 'Rescue';
-      case 'medical': return 'Medical';
-      case 'typhoon': return 'Typhoon';
-      case 'earthquake': return 'Earthquake';
-      case 'fire': return 'Fire';
-      case 'seawall': return 'Seawall';
-      default: return 'Emergency Report';
-    }
-  }
-  
-  void _showReportDetails(BuildContext context, Map<String, dynamic> report) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(_getEmergencyTypeTitle(report['emergencyType'])),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Severity: ${report['severityLabel']}'),
-              const SizedBox(height: 8),
-              Text('Location: ${report['userData']['address'] ?? 'Unknown'}'),
-              const SizedBox(height: 8),
-              if (report['description'].isNotEmpty) ...[
-                const Text('Description:'),
-                Text(report['description']),
-                const SizedBox(height: 8),
-              ],
-              Text('Time: ${report['timestamp']}'),
-              const SizedBox(height: 8),
-              if (report['synced'] == true)
-                const Text('✅ Synced', style: TextStyle(color: Colors.green))
-              else
-                const Text('⚠️ Pending Sync', style: TextStyle(color: Colors.orange)),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
       ),
     );
   }

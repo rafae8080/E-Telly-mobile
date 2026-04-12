@@ -3,7 +3,6 @@ import 'package:e_telly_app/dbhelper/mongodb.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'services/offline_report_storage.dart';
 import 'services/hive_service.dart';
 import 'screens/dashboard_screen.dart';
@@ -75,7 +74,7 @@ class EtellyApp extends StatelessWidget {
             '/home': (context) => const HomeScreen(),
             '/alerts': (context) => const AlertsScreen(),
             '/report-emergency': (context) => const ReportEmergencyScreen(),
-            '/flood-monitor': (context) => const FloodMonitoringScreen(),
+            '/flood-monitor': (context) => const DisasterMonitoringScreen(),
             '/safety-tips': (context) => const SafetyTipsScreen(),
             '/login': (context) => const LoginScreen(),
             '/welcome': (context) => const WelcomeScreen(),

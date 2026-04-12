@@ -18,7 +18,7 @@ class EmergencyType {
 }
 
 class SeverityLevel {
-  final int level;
+  final String level;
   final String label;
   final String description;
   final Color color;
@@ -29,13 +29,6 @@ class SeverityLevel {
     required this.description,
     required this.color,
   });
-}
-
-class UserData {
-  final String? fullName;
-  final String? address;
-  final String? phoneNumber;
-  UserData({this.fullName, this.address, this.phoneNumber});
 }
 
 // --- WIDGETS ---
