@@ -54,6 +54,7 @@ class InputField extends StatelessWidget {
   final bool enabled;
   final bool isLoading;
   final Function(String, String) onChanged;
+  final String? hintText;
 
   const InputField({
     Key? key,
@@ -70,6 +71,7 @@ class InputField extends StatelessWidget {
     this.enabled = true,
     required this.isLoading,
     required this.onChanged,
+    this.hintText,
   }) : super(key: key);
 
   String _getHintText(String fieldName) {
@@ -135,7 +137,7 @@ class InputField extends StatelessWidget {
                   ),
                   decoration: InputDecoration(
                     border: InputBorder.none,
-                    hintText: _getHintText(fieldName),
+                    hintText: hintText ?? _getHintText(fieldName),
                     hintStyle: const TextStyle(
                       color: Color(0xFF9CA3AF),
                     ),

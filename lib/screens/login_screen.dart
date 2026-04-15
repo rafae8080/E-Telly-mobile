@@ -40,6 +40,13 @@ class _LoginScreenState extends State<LoginScreen> {
     _checkAutoLogin();
   }
 
+  Future<bool> _ensureMongoConnected() async {
+    if (MongoDatabase.db == null || MongoDatabase.userCollection == null) {
+      await MongoDatabase.connect();
+    }
+    return MongoDatabase.userCollection != null;
+  }
+
   Future<void> _checkAutoLogin() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -107,6 +114,13 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      if (!await _ensureMongoConnected()) {
+        setState(() {
+          _generalError = 'Unable to connect to the server. Please try again in a moment.';
+        });
+        return;
+      }
+
       var user = await MongoDatabase.findUserForLogin(
         _emailController.text.trim().toLowerCase(),
         _passwordController.text,
@@ -236,6 +250,14 @@ class _LoginScreenState extends State<LoginScreen> {
       print('   Email: ${googleUser.email}');
       print('   Name: ${googleUser.displayName}');
       print('   Photo: ${googleUser.photoUrl}');
+
+      // Ensure database connection before using MongoDB
+      if (!await _ensureMongoConnected()) {
+        setState(() {
+          _generalError = 'Unable to connect to the server. Please try again in a moment.';
+        });
+        return;
+      }
 
       // Check if user already exists in MongoDB
       var existingUser = await MongoDatabase.findUserByEmail(googleUser.email.toLowerCase());

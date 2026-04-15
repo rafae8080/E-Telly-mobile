@@ -3,6 +3,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sign_up.dart';
 import '../dbhelper/mongodb.dart';
 
+// Antipolo City specific barangays
+final List<Map<String, String>> antipoloBarangays = [
+  {'id': 'bagong_nayon', 'name': 'Bagong Nayon', 'value': 'Bagong Nayon'},
+  {'id': 'beverly_hills', 'name': 'Beverly Hills', 'value': 'Beverly Hills'},
+  {'id': 'calumpang', 'name': 'Calumpang', 'value': 'Calumpang'},
+  {'id': 'cupang', 'name': 'Cupang', 'value': 'Cupang'},
+  {'id': 'dalig', 'name': 'Dalig', 'value': 'Dalig'},
+  {'id': 'dela_paz', 'name': 'Dela Paz', 'value': 'Dela Paz'},
+  {'id': 'inarawan', 'name': 'Inarawan', 'value': 'Inarawan'},
+  {'id': 'ligaya', 'name': 'Ligaya', 'value': 'Ligaya'},
+  {'id': 'mambugan', 'name': 'Mambugan', 'value': 'Mambugan'},
+  {'id': 'muntingdilaw', 'name': 'Muntingdilaw', 'value': 'Muntingdilaw'},
+  {'id': 'san_isidro', 'name': 'San Isidro', 'value': 'San Isidro'},
+  {'id': 'san_jose', 'name': 'San Jose', 'value': 'San Jose'},
+  {'id': 'san_juan', 'name': 'San Juan', 'value': 'San Juan'},
+  {'id': 'san_luis', 'name': 'San Luis', 'value': 'San Luis'},
+  {'id': 'san_roque', 'name': 'San Roque', 'value': 'San Roque'},
+  {'id': 'santa_cruz', 'name': 'Santa Cruz', 'value': 'Santa Cruz'},
+  {'id': 'santa_elena', 'name': 'Santa Elena', 'value': 'Santa Elena'},
+  {'id': 'taytay', 'name': 'Taytay', 'value': 'Taytay'},
+  {'id': 'tumana', 'name': 'Tumana', 'value': 'Tumana'},
+  {'id': 'villa_carissa', 'name': 'Villa Carissa', 'value': 'Villa Carissa'},
+];
+
 class SignUpScreen extends StatefulWidget {
   final VoidCallback? onSignUpSuccess;
   final VoidCallback? onLoginPressed;
@@ -26,6 +50,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   final _streetDetailsController = TextEditingController();
+  final _landmarkController = TextEditingController(); // New for Antipolo
 
   // State variables
   bool _showPassword = false;
@@ -40,12 +65,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
   String? _confirmPasswordError;
   String? _barangayError;
   String? _streetDetailsError;
-
-  // Barangay options
-  final List<Map<String, String>> _barangays = [
-    {'id': 'tanza1', 'name': 'Tanza 1', 'value': 'Tanza 1'},
-    {'id': 'tanza2', 'name': 'Tanza 2', 'value': 'Tanza 2'},
-  ];
 
   bool _validateForm() {
     bool isValid = true;
@@ -67,18 +86,18 @@ class _SignUpScreenState extends State<SignUpScreen> {
       isValid = false;
     }
 
-    // Barangay validation
+    // Barangay validation - Check against Antipolo barangays
     if (_selectedBarangay == null || _selectedBarangay!.isEmpty) {
-      errors['barangay'] = 'Please select your barangay';
+      errors['barangay'] = 'Please select your barangay in Antipolo City';
       isValid = false;
-    } else if (!['Tanza 1', 'Tanza 2'].contains(_selectedBarangay!.trim())) {
-      errors['barangay'] = 'Please select a valid barangay';
+    } else if (!antipoloBarangays.any((b) => b['value'] == _selectedBarangay!.trim())) {
+      errors['barangay'] = 'Please select a valid barangay in Antipolo City';
       isValid = false;
     }
 
     // Street Details validation
     if (_streetDetailsController.text.trim().isEmpty) {
-      errors['streetDetails'] = 'Street details are required';
+      errors['streetDetails'] = 'Street/Building details are required';
       isValid = false;
     }
 
@@ -138,20 +157,28 @@ class _SignUpScreenState extends State<SignUpScreen> {
         return;
       }
 
-      // Combine barangay and street details into full address
-      final fullAddress =
-          '${_streetDetailsController.text.trim()}, ${_selectedBarangay!.trim()}';
+      // Combine street details, landmark, and barangay into full address
+      String fullAddress = _streetDetailsController.text.trim();
+      if (_landmarkController.text.trim().isNotEmpty) {
+        fullAddress += ' (Near: ${_landmarkController.text.trim()})';
+      }
+      fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
 
       // Prepare user data for MongoDB
       Map<String, dynamic> userData = {
         'name': _nameController.text.trim(),
         'email': _emailController.text.trim().toLowerCase(),
-        'password': _passwordController.text, 
+        'password': _passwordController.text,
         'address': fullAddress,
         'barangay': _selectedBarangay!.trim(),
         'streetDetails': _streetDetailsController.text.trim(),
+        'landmark': _landmarkController.text.trim(),
+        'region': 'CALABARZON (Region IV-A)',
+        'province': 'Rizal',
+        'city': 'Antipolo City',
+        'postalCode': '1870',
         'isActive': true,
-        'role': 'user',
+        'role': 'resident',
         'createdAt': DateTime.now().toIso8601String(),
         'emailVerified': false,
       };
@@ -160,7 +187,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
       bool success = await MongoDatabase.insertUser(userData);
 
       if (success) {
-        // CRITICAL: Save user data to SharedPreferences BEFORE showing success dialog
+        // Save user data to SharedPreferences
         await _saveUserDataToPreferences();
         
         // Show success dialog
@@ -189,44 +216,42 @@ class _SignUpScreenState extends State<SignUpScreen> {
   Future<void> _saveUserDataToPreferences() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-    
       
-     
       await prefs.setString('full_name', _nameController.text.trim());
       await prefs.setString('email', _emailController.text.trim().toLowerCase());
       await prefs.setString('phone_number', ''); 
-      await prefs.setString('region', '');
-      await prefs.setString('province', ''); 
-      await prefs.setString('city', ''); 
+      await prefs.setString('region', 'CALABARZON (Region IV-A)');
+      await prefs.setString('province', 'Rizal'); 
+      await prefs.setString('city', 'Antipolo City'); 
       await prefs.setString('barangay', _selectedBarangay!.trim());
-      await prefs.setString('postal_code', ''); 
+      await prefs.setString('postal_code', '1870'); 
       await prefs.setString('street_address', _streetDetailsController.text.trim());
+      await prefs.setString('landmark', _landmarkController.text.trim());
       await prefs.setString('emergency_contact_name', ''); 
       await prefs.setString('emergency_contact_phone', ''); 
       await prefs.setString('emergency_contact_relationship', ''); 
       await prefs.setString('role', 'resident');
+      await prefs.setString('userEmail', _emailController.text.trim().toLowerCase());
       
-   
-      
-      print(' User data saved to SharedPreferences successfully!');
-      print('   Name: ${_nameController.text.trim()}');
-      print('   Email: ${_emailController.text.trim().toLowerCase()}');
-      print('   Barangay: ${_selectedBarangay!.trim()}');
-      print('   Street: ${_streetDetailsController.text.trim()}');
-      
-      
-      String? verifyName = prefs.getString('full_name');
-      String? verifyEmail = prefs.getString('email');
-      print('   Verification - Name: $verifyName, Email: $verifyEmail');
+      print('User data saved to SharedPreferences successfully!');
+      print('  Name: ${_nameController.text.trim()}');
+      print('  Email: ${_emailController.text.trim().toLowerCase()}');
+      print('  Barangay: ${_selectedBarangay!.trim()}');
+      print('  Street: ${_streetDetailsController.text.trim()}');
+      print('  Landmark: ${_landmarkController.text.trim()}');
+      print('  Location: Antipolo City, Rizal');
       
     } catch (error) {
-      print(' Error saving to SharedPreferences: $error');
+      print('Error saving to SharedPreferences: $error');
     }
   }
 
   void _showSuccessDialog() {
-    final fullAddress =
-        '${_streetDetailsController.text.trim()}, ${_selectedBarangay!.trim()}';
+    String fullAddress = _streetDetailsController.text.trim();
+    if (_landmarkController.text.trim().isNotEmpty) {
+      fullAddress += ' (Near: ${_landmarkController.text.trim()})';
+    }
+    fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
 
     showDialog(
       context: context,
@@ -243,6 +268,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
             Text('Welcome to E-Telly, ${_nameController.text.trim()}!'),
             const SizedBox(height: 10),
             Text('Email: ${_emailController.text.trim()}'),
+            Text('Location: Antipolo City'),
+            Text('Barangay: ${_selectedBarangay!.trim()}'),
             Text('Address: $fullAddress'),
             const SizedBox(height: 15),
             const Text(
@@ -256,13 +283,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
             onPressed: () {
               Navigator.pop(context);
               
-          
               if (widget.onSignUpSuccess != null) {
                 widget.onSignUpSuccess!();
               } else if (widget.onLoginPressed != null) {
                 widget.onLoginPressed!();
               } else {
-               
                 Navigator.pop(context);
               }
             },
@@ -340,7 +365,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
         ),
       ),
       builder: (context) => BarangayModal(
-        barangays: _barangays,
+        barangays: antipoloBarangays,
         selectedBarangay: _selectedBarangay,
         onSelect: _selectBarangay,
       ),
@@ -385,6 +410,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
             child: Column(
               children: [
                 const SizedBox(height: 20),
+              
+                
                 Column(
                   children: [
                     // Name
@@ -412,7 +439,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                     ),
                     const SizedBox(height: 15),
 
-                    // Barangay Selector
+                    // Barangay Selector (Antipolo Barangays)
                     BarangaySelector(
                       selectedBarangay: _selectedBarangay,
                       barangayError: _barangayError,
@@ -430,6 +457,18 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       errorText: _streetDetailsError,
                       isLoading: _isLoading,
                       onChanged: _updateField,
+                    ),
+                    const SizedBox(height: 15),
+
+                    // Landmark (New for Antipolo)
+                    InputField(
+                      label: 'Landmark (Optional)',
+                      icon: Icons.flag_outlined,
+                      controller: _landmarkController,
+                      fieldName: 'landmark',
+                      hintText: 'e.g., Near Antipolo Cathedral, beside SM Cherry',
+                      isLoading: _isLoading,
+                      onChanged: (field, value) {},
                     ),
                     const SizedBox(height: 15),
 
@@ -507,6 +546,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     _streetDetailsController.dispose();
+    _landmarkController.dispose();
     super.dispose();
   }
 }

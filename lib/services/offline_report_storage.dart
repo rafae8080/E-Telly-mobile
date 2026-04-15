@@ -19,7 +19,6 @@ class OfflineReportStorage {
     }
     return _box!;
   }
-  
 
   static Box<Map> get registrationsBox {
     if (_registrationsBox == null) {
@@ -27,58 +26,99 @@ class OfflineReportStorage {
     }
     return _registrationsBox!;
   }
-  
 
-  
- 
+  // FIX: Safe conversion helper for Hive maps
+  static Map<String, dynamic> _safeConvert(Map<dynamic, dynamic> dynamicMap) {
+    Map<String, dynamic> result = {};
+    dynamicMap.forEach((key, value) {
+      result[key.toString()] = value;
+    });
+    return result;
+  }
+
   static Future<void> saveReport(Map<String, dynamic> report) async {
     try {
-      await box.add(report);
+      // Convert to safe map before saving
+      Map<String, dynamic> safeReport = {};
+      report.forEach((key, value) {
+        safeReport[key.toString()] = value;
+      });
+      
+      await box.add(safeReport);
       print('Emergency report saved offline: ${report['title']}');
     } catch (e) {
       print('Error saving report: $e');
       rethrow;
     }
   }
-  
 
+  // FIXED: This was causing the error
   static List<Map<String, dynamic>> getUnsyncedReports() {
     try {
-      return box.values
-          .cast<Map<String, dynamic>>()
-          .where((report) => report['synced'] == false)
-          .toList();
+      List<Map<String, dynamic>> unsyncedReports = [];
+      
+      for (var report in box.values) {
+        // Convert each report safely
+        Map<String, dynamic> safeReport = {};
+        report.forEach((key, value) {
+          safeReport[key.toString()] = value;
+        });
+        
+        if (safeReport['synced'] == false) {
+          unsyncedReports.add(safeReport);
+        }
+      }
+      
+      print('Found ${unsyncedReports.length} unsynced reports');
+      return unsyncedReports;
+      
     } catch (e) {
       print('Error getting unsynced reports: $e');
       return [];
     }
   }
   
- 
+  // FIXED: This method also needs fixing
   static List<Map<String, dynamic>> getAllReports() {
     try {
-      return box.values.cast<Map<String, dynamic>>().toList();
+      List<Map<String, dynamic>> allReports = [];
+      
+      for (var report in box.values) {
+        // Convert each report safely
+        Map<String, dynamic> safeReport = {};
+        report.forEach((key, value) {
+          safeReport[key.toString()] = value;
+        });
+        allReports.add(safeReport);
+      }
+      
+      return allReports;
+      
     } catch (e) {
       print('Error getting reports: $e');
       return [];
     }
   }
   
-  
   static Future<void> markAsSynced(int index) async {
     try {
       final report = box.getAt(index);
       if (report != null) {
-        report['synced'] = true;
-        report['syncedAt'] = DateTime.now().toIso8601String();
-        await box.putAt(index, report);
+        // Create a safe copy
+        Map<String, dynamic> safeReport = {};
+        report.forEach((key, value) {
+          safeReport[key.toString()] = value;
+        });
+        
+        safeReport['synced'] = true;
+        safeReport['syncedAt'] = DateTime.now().toIso8601String();
+        await box.putAt(index, safeReport);
         print('Report marked as synced at index $index');
       }
     } catch (e) {
       print('Error marking report as synced: $e');
     }
   }
-  
 
   static Future<void> deleteReport(int index) async {
     try {
@@ -88,7 +128,6 @@ class OfflineReportStorage {
       print('Error deleting report: $e');
     }
   }
-  
 
   static Future<void> clearAllReports() async {
     try {
@@ -102,12 +141,10 @@ class OfflineReportStorage {
   static int getReportCount() {
     return box.length;
   }
-  
 
   static int getPendingSyncCount() {
     return getUnsyncedReports().length;
   }
-  
 
   static Future<void> syncReportsToServer() async {
     final unsynced = getUnsyncedReports();
@@ -135,61 +172,90 @@ class OfflineReportStorage {
     }
   }
   
- 
-  
   static Future<void> saveRegistration(Map<String, dynamic> userData) async {
     try {
-      await registrationsBox.add(userData);
+      // Convert to safe map
+      Map<String, dynamic> safeData = {};
+      userData.forEach((key, value) {
+        safeData[key.toString()] = value;
+      });
+      
+      await registrationsBox.add(safeData);
       print('Registration saved offline: ${userData['email']}');
     } catch (e) {
       print('Error saving registration: $e');
       rethrow;
     }
   }
-  
 
+  // FIXED: Pending registrations method
   static List<Map<String, dynamic>> getPendingRegistrations() {
     try {
-      return registrationsBox.values
-          .cast<Map<String, dynamic>>()
-          .where((reg) => reg['synced'] == false)
-          .toList();
+      List<Map<String, dynamic>> pendingRegistrations = [];
+      
+      for (var reg in registrationsBox.values) {
+        // Convert each registration safely
+        Map<String, dynamic> safeReg = {};
+        reg.forEach((key, value) {
+          safeReg[key.toString()] = value;
+        });
+        
+        if (safeReg['synced'] == false) {
+          pendingRegistrations.add(safeReg);
+        }
+      }
+      
+      return pendingRegistrations;
+      
     } catch (e) {
       print('Error getting pending registrations: $e');
       return [];
     }
   }
   
-  
   static int getPendingRegistrationsCount() {
     return getPendingRegistrations().length;
   }
   
- 
+  // FIXED: Get all registrations
   static List<Map<String, dynamic>> getAllRegistrations() {
     try {
-      return registrationsBox.values.cast<Map<String, dynamic>>().toList();
+      List<Map<String, dynamic>> allRegistrations = [];
+      
+      for (var reg in registrationsBox.values) {
+        Map<String, dynamic> safeReg = {};
+        reg.forEach((key, value) {
+          safeReg[key.toString()] = value;
+        });
+        allRegistrations.add(safeReg);
+      }
+      
+      return allRegistrations;
+      
     } catch (e) {
       print('Error getting all registrations: $e');
       return [];
     }
   }
-  
 
   static Future<void> markRegistrationAsSynced(int index) async {
     try {
       final reg = registrationsBox.getAt(index);
       if (reg != null) {
-        reg['synced'] = true;
-        reg['syncedAt'] = DateTime.now().toIso8601String();
-        await registrationsBox.putAt(index, reg);
+        Map<String, dynamic> safeReg = {};
+        reg.forEach((key, value) {
+          safeReg[key.toString()] = value;
+        });
+        
+        safeReg['synced'] = true;
+        safeReg['syncedAt'] = DateTime.now().toIso8601String();
+        await registrationsBox.putAt(index, safeReg);
         print('Registration marked as synced at index $index');
       }
     } catch (e) {
       print('Error marking registration as synced: $e');
     }
   }
-  
 
   static Future<void> deleteRegistration(int index) async {
     try {
@@ -199,7 +265,6 @@ class OfflineReportStorage {
       print('Error deleting registration: $e');
     }
   }
-  
 
   static Future<void> clearAllRegistrations() async {
     try {
@@ -210,7 +275,6 @@ class OfflineReportStorage {
     }
   }
   
-  // Sync all pending registrations to server
   static Future<void> syncRegistrationsToServer() async {
     final pending = getPendingRegistrations();
     if (pending.isEmpty) return;
@@ -225,8 +289,7 @@ class OfflineReportStorage {
             r['id'] == registration['id']);
         
         if (index != -1) {
-          // TODO: Send to MongoDB
-          // await MongoDatabase.insertUser(registration);
+        
           
           await markRegistrationAsSynced(index);
           print('Registration synced: ${registration['email']}');
@@ -237,7 +300,6 @@ class OfflineReportStorage {
     }
   }
   
-  // Get registrations box for ValueListenableBuilder
   static Box<Map> getRegistrationBox() {
     return registrationsBox;
   }

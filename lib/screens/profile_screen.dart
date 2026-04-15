@@ -5,6 +5,30 @@ import 'dart:io';
 import '../widgets/profile.dart';
 import '../dbhelper/mongodb.dart';
 
+// Antipolo City specific barangays
+final List<String> antipoloBarangays = [
+  'Bagong Nayon',
+  'Beverly Hills',
+  'Calumpang',
+  'Cupang',
+  'Dalig',
+  'Dela Paz',
+  'Inarawan',
+  'Ligaya',
+  'Mambugan',
+  'Muntingdilaw',
+  'San Isidro',
+  'San Jose',
+  'San Juan',
+  'San Luis',
+  'San Roque',
+  'Santa Cruz',
+  'Santa Elena',
+  'Taytay',
+  'Tumana',
+  'Villa Carissa'
+];
+
 class UserProfile {
   String? id;
   String? fullName;
@@ -19,6 +43,7 @@ class UserProfile {
   String? emergencyContactName;
   String? emergencyContactPhone;
   String? emergencyContactRelationship;
+  String? landmark;
   String role;
 
   UserProfile({
@@ -26,15 +51,16 @@ class UserProfile {
     this.fullName,
     this.email,
     this.phoneNumber,
-    this.region,
-    this.province,
-    this.city,
+    this.region = 'CALABARZON (Region IV-A)',
+    this.province = 'Rizal',
+    this.city = 'Antipolo City',
     this.barangay,
-    this.postalCode,
+    this.postalCode = '1870',
     this.streetAddress,
     this.emergencyContactName,
     this.emergencyContactPhone,
     this.emergencyContactRelationship,
+    this.landmark,
     this.role = 'resident',
   });
 
@@ -53,6 +79,7 @@ class UserProfile {
       emergencyContactName: emergencyContactName,
       emergencyContactPhone: emergencyContactPhone,
       emergencyContactRelationship: emergencyContactRelationship,
+      landmark: landmark,
       role: role,
     );
   }
@@ -78,12 +105,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   late TextEditingController _nameController;
   late TextEditingController _phoneController;
-  late TextEditingController _regionController;
-  late TextEditingController _provinceController;
-  late TextEditingController _cityController;
   late TextEditingController _barangayController;
-  late TextEditingController _postalCodeController;
   late TextEditingController _streetAddressController;
+  late TextEditingController _landmarkController;
   late TextEditingController _emergencyNameController;
   late TextEditingController _emergencyPhoneController;
   late TextEditingController _emergencyRelationshipController;
@@ -98,12 +122,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _initializeControllers() {
     _nameController = TextEditingController();
     _phoneController = TextEditingController();
-    _regionController = TextEditingController();
-    _provinceController = TextEditingController();
-    _cityController = TextEditingController();
     _barangayController = TextEditingController();
-    _postalCodeController = TextEditingController();
     _streetAddressController = TextEditingController();
+    _landmarkController = TextEditingController();
     _emergencyNameController = TextEditingController();
     _emergencyPhoneController = TextEditingController();
     _emergencyRelationshipController = TextEditingController();
@@ -113,12 +134,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void dispose() {
     _nameController.dispose();
     _phoneController.dispose();
-    _regionController.dispose();
-    _provinceController.dispose();
-    _cityController.dispose();
     _barangayController.dispose();
-    _postalCodeController.dispose();
     _streetAddressController.dispose();
+    _landmarkController.dispose();
     _emergencyNameController.dispose();
     _emergencyPhoneController.dispose();
     _emergencyRelationshipController.dispose();
@@ -128,12 +146,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _updateControllersFromProfile() {
     _nameController.text = _editedProfile.fullName ?? '';
     _phoneController.text = _editedProfile.phoneNumber ?? '';
-    _regionController.text = _editedProfile.region ?? '';
-    _provinceController.text = _editedProfile.province ?? '';
-    _cityController.text = _editedProfile.city ?? '';
     _barangayController.text = _editedProfile.barangay ?? '';
-    _postalCodeController.text = _editedProfile.postalCode ?? '';
     _streetAddressController.text = _editedProfile.streetAddress ?? '';
+    _landmarkController.text = _editedProfile.landmark ?? '';
     _emergencyNameController.text = _editedProfile.emergencyContactName ?? '';
     _emergencyPhoneController.text = _editedProfile.emergencyContactPhone ?? '';
     _emergencyRelationshipController.text =
@@ -148,8 +163,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       
-      
-      _userEmail = prefs.getString('userEmail');  
+      _userEmail = prefs.getString('userEmail');
       
       if (_userEmail == null || _userEmail!.isEmpty) {
         print('No logged in user found');
@@ -162,18 +176,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
       
       print('Loading profile for email: $_userEmail');
       
-      // Fetch user data from MongoDB
       var userData = await MongoDatabase.findUserByEmail(_userEmail!);
       
       if (userData != null) {
         print('User data found: ${userData['email']}');
         
-        // Extract data from MongoDB document
         String fullName = userData['name'] ?? '';
         String email = userData['email'] ?? '';
         String barangay = userData['barangay'] ?? '';
         String streetDetails = userData['streetDetails'] ?? '';
         String role = userData['role'] ?? 'resident';
+        String landmark = userData['landmark'] ?? '';
         
         setState(() {
           _profile = UserProfile(
@@ -181,19 +194,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
             fullName: fullName,
             email: email,
             phoneNumber: userData['phoneNumber'] ?? '',
-            region: userData['region'] ?? '',
-            province: userData['province'] ?? '',
-            city: userData['city'] ?? '',
+            region: 'CALABARZON (Region IV-A)',
+            province: 'Rizal',
+            city: 'Antipolo City',
             barangay: barangay,
-            postalCode: userData['postalCode'] ?? '',
+            postalCode: '1870',
             streetAddress: streetDetails,
             emergencyContactName: userData['emergencyContactName'] ?? '',
             emergencyContactPhone: userData['emergencyContactPhone'] ?? '',
             emergencyContactRelationship: userData['emergencyContactRelationship'] ?? '',
+            landmark: landmark,
             role: role,
           );
           
-          // Also save to SharedPreferences for offline access
           _saveProfileToPreferences();
           
           _editedProfile = _profile.copy();
@@ -228,6 +241,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       await prefs.setString('barangay', _profile.barangay ?? '');
       await prefs.setString('postal_code', _profile.postalCode ?? '');
       await prefs.setString('street_address', _profile.streetAddress ?? '');
+      await prefs.setString('landmark', _profile.landmark ?? '');
       await prefs.setString('emergency_contact_name', _profile.emergencyContactName ?? '');
       await prefs.setString('emergency_contact_phone', _profile.emergencyContactPhone ?? '');
       await prefs.setString('emergency_contact_relationship', _profile.emergencyContactRelationship ?? '');
@@ -304,39 +318,41 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return;
     }
 
+    if (_editedProfile.barangay == null || _editedProfile.barangay!.isEmpty) {
+      _showAlert('Error', 'Please select your barangay in Antipolo City');
+      return;
+    }
+
     setState(() {
       _isLoading = true;
     });
 
     try {
-      // data for mongodb
       Map<String, dynamic> updatedData = {
         'name': _editedProfile.fullName,
         'phoneNumber': _editedProfile.phoneNumber ?? '',
-        'region': _editedProfile.region ?? '',
-        'province': _editedProfile.province ?? '',
-        'city': _editedProfile.city ?? '',
-        'barangay': _editedProfile.barangay ?? '',
-        'postalCode': _editedProfile.postalCode ?? '',
+        'region': 'CALABARZON (Region IV-A)',
+        'province': 'Rizal',
+        'city': 'Antipolo City',
+        'barangay': _editedProfile.barangay,
+        'postalCode': '1870',
         'streetDetails': _editedProfile.streetAddress ?? '',
-        'address': '${_editedProfile.streetAddress ?? ''}, ${_editedProfile.barangay ?? ''}',
+        'landmark': _editedProfile.landmark ?? '',
+        'address': '${_editedProfile.streetAddress ?? ''}, ${_editedProfile.barangay ?? ''}, Antipolo City, Rizal',
         'emergencyContactName': _editedProfile.emergencyContactName ?? '',
         'emergencyContactPhone': _editedProfile.emergencyContactPhone ?? '',
         'emergencyContactRelationship': _editedProfile.emergencyContactRelationship ?? '',
       };
       
-      // Update user in MongoDB
       bool success = await MongoDatabase.updateUser(_userEmail!, updatedData);
       
       if (success) {
-        // Update local profile
         setState(() {
           _profile = _editedProfile.copy();
           _isEditing = false;
           _isLoading = false;
         });
         
-        // Update SharedPreferences
         await _saveProfileToPreferences();
         
         _showAlert('Success', 'Profile updated successfully');
@@ -423,6 +439,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  void _showBarangayPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.6,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(20),
+            topRight: Radius.circular(20),
+          ),
+        ),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: const BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: Colors.grey, width: 0.5),
+                ),
+              ),
+              child: const Text(
+                'Select Barangay in Antipolo City',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: antipoloBarangays.length,
+                itemBuilder: (context, index) {
+                  return ListTile(
+                    title: Text(antipoloBarangays[index]),
+                    onTap: () {
+                      setState(() {
+                        _editedProfile.barangay = antipoloBarangays[index];
+                        _barangayController.text = antipoloBarangays[index];
+                      });
+                      Navigator.pop(context);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showAlert(String title, String message) {
     showDialog(
       context: context,
@@ -462,6 +531,42 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return Scaffold(
       backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text(
+          'My Profile',
+          style: TextStyle(
+            color: Color(0xFF1F2937),
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        backgroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: true,
+        actions: [
+          if (!_isEditing)
+            IconButton(
+              onPressed: _handleEdit,
+              icon: const Icon(Icons.edit, color: Color(0xFFDC2626)),
+            ),
+          if (_isEditing)
+            TextButton(
+              onPressed: _handleSave,
+              child: const Text(
+                'Save',
+                style: TextStyle(
+                  color: Color(0xFFDC2626),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+        ],
+        leading: _isEditing
+            ? IconButton(
+                onPressed: _handleCancel,
+                icon: const Icon(Icons.close, color: Color(0xFFDC2626)),
+              )
+            : null,
+      ),
       body: Column(
         children: [
           Expanded(
@@ -578,11 +683,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   () => _editedProfile.fullName = value,
                                 ),
                                 style: const TextStyle(
-                                  fontSize: 20,
+                                  fontSize: 18,
                                   fontWeight: FontWeight.bold,
                                   color: Color(0xFF1F2937),
                                 ),
                                 decoration: InputDecoration(
+                                  hintText: 'Full Name',
                                   contentPadding: const EdgeInsets.symmetric(
                                     horizontal: 12,
                                     vertical: 8,
@@ -607,7 +713,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               Text(
                                 _profile.fullName ?? 'User',
                                 style: const TextStyle(
-                                  fontSize: 20,
+                                  fontSize: 18,
                                   fontWeight: FontWeight.bold,
                                   color: Color(0xFF1F2937),
                                 ),
@@ -616,34 +722,74 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             Text(
                               _profile.email ?? '',
                               style: const TextStyle(
-                                fontSize: 14,
+                                fontSize: 13,
                                 color: Color(0xFF666666),
                               ),
                             ),
                             const SizedBox(height: 4),
-                            Text(
-                              _profile.role == 'lgu_admin'
-                                  ? 'LGU Admin'
-                                  : 'Resident',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFFDC2626),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFDC2626).withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                _profile.role == 'lgu_admin'
+                                    ? 'LGU Admin'
+                                    : 'Resident',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Color(0xFFDC2626),
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
-                      IconButton(
-                        onPressed: _isEditing ? _handleSave : _handleEdit,
-                        icon: Icon(
-                          _isEditing ? Icons.check : Icons.edit,
-                          size: 22,
-                          color: const Color(0xFFDC2626),
-                        ),
-                      ),
                     ],
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 20),
+                  
+                  // Antipolo City Location Card
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFEF2F2),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFDC2626).withOpacity(0.2)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.location_on, color: Color(0xFFDC2626), size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                '📍 Antipolo City',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF1F2937),
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Rizal Province, CALABARZON Region',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  
                   PersonalInfoSection(
                     isEditing: _isEditing,
                     profile: _profile,
@@ -651,32 +797,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     onPhoneChanged: (value) =>
                         setState(() => _editedProfile.phoneNumber = value),
                   ),
+                  
                   AddressSection(
                     isEditing: _isEditing,
                     profile: _profile,
-                    regionController: _regionController,
-                    provinceController: _provinceController,
-                    cityController: _cityController,
                     barangayController: _barangayController,
-                    postalCodeController: _postalCodeController,
                     streetAddressController: _streetAddressController,
-                    onRegionChanged: (value) =>
-                        setState(() => _editedProfile.region = value),
-                    onProvinceChanged: (value) =>
-                        setState(() => _editedProfile.province = value),
-                    onCityChanged: (value) =>
-                        setState(() => _editedProfile.city = value),
+                    landmarkController: _landmarkController,
                     onBarangayChanged: (value) =>
                         setState(() => _editedProfile.barangay = value),
-                    onPostalCodeChanged: (value) =>
-                        setState(() => _editedProfile.postalCode = value),
                     onStreetAddressChanged: (value) =>
                         setState(() => _editedProfile.streetAddress = value),
-                    onCurrentLocation: () => _showAlert(
-                      'Info',
-                      'Current location feature would be implemented here',
-                    ),
+                    onLandmarkChanged: (value) =>
+                        setState(() => _editedProfile.landmark = value),
+                    onBarangayTap: _showBarangayPicker,
                   ),
+                  
                   EmergencyContactSection(
                     isEditing: _isEditing,
                     profile: _profile,
@@ -696,11 +832,62 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     onInfoPressed: () =>
                         setState(() => _showEmergencyModal = true),
                   ),
-                  ActionButtons(
-                    isEditing: _isEditing,
-                    onCancel: _handleCancel,
-                    onLogout: _handleLogout,
-                  ),
+                  
+                  const SizedBox(height: 20),
+                  
+                  // Logout Button - only show when not editing
+                  if (!_isEditing)
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: _handleLogout,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFDC2626),
+                          side: const BorderSide(color: Color(0xFFDC2626)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: const Text('Log Out'),
+                      ),
+                    ),
+                  
+                  // Cancel and Save buttons when editing
+                  if (_isEditing)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _handleCancel,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFFDC2626),
+                              side: const BorderSide(color: Color(0xFFDC2626)),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _handleSave,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFDC2626),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            child: const Text('Save Changes'),
+                          ),
+                        ),
+                      ],
+                    ),
                   const SizedBox(height: 8),
                 ],
               ),
@@ -713,6 +900,559 @@ class _ProfileScreenState extends State<ProfileScreen> {
               onClose: () => setState(() => _showEmergencyModal = false),
             )
           : null,
+    );
+  }
+}
+
+// Personal Information Section
+class PersonalInfoSection extends StatelessWidget {
+  final bool isEditing;
+  final UserProfile profile;
+  final TextEditingController phoneController;
+  final Function(String) onPhoneChanged;
+
+  const PersonalInfoSection({
+    super.key,
+    required this.isEditing,
+    required this.profile,
+    required this.phoneController,
+    required this.onPhoneChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey[200]!),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.person, size: 20, color: Color(0xFFDC2626)),
+                const SizedBox(width: 8),
+                const Text(
+                  'Personal Information',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (isEditing) ...[
+              TextField(
+                controller: phoneController,
+                onChanged: onPhoneChanged,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'Phone Number',
+                  hintText: '09XX XXX XXXX',
+                  prefixIcon: const Icon(Icons.phone, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+            ] else ...[
+              _buildInfoRow('Phone Number', profile.phoneNumber ?? 'Not set'),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF666666),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Address Section for Antipolo City
+class AddressSection extends StatelessWidget {
+  final bool isEditing;
+  final UserProfile profile;
+  final TextEditingController barangayController;
+  final TextEditingController streetAddressController;
+  final TextEditingController landmarkController;
+  final Function(String) onBarangayChanged;
+  final Function(String) onStreetAddressChanged;
+  final Function(String) onLandmarkChanged;
+  final VoidCallback onBarangayTap;
+
+  const AddressSection({
+    super.key,
+    required this.isEditing,
+    required this.profile,
+    required this.barangayController,
+    required this.streetAddressController,
+    required this.landmarkController,
+    required this.onBarangayChanged,
+    required this.onStreetAddressChanged,
+    required this.onLandmarkChanged,
+    required this.onBarangayTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey[200]!),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.home, size: 20, color: Color(0xFFDC2626)),
+                const SizedBox(width: 8),
+                const Text(
+                  'Address Details',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  'Antipolo City',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (isEditing) ...[
+              GestureDetector(
+                onTap: onBarangayTap,
+                child: AbsorbPointer(
+                  child: TextField(
+                    controller: barangayController,
+                    onChanged: onBarangayChanged,
+                    decoration: InputDecoration(
+                      labelText: 'Barangay *',
+                      hintText: 'Select your barangay in Antipolo',
+                      prefixIcon: const Icon(Icons.location_city, size: 20),
+                      suffixIcon: const Icon(Icons.arrow_drop_down),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: streetAddressController,
+                onChanged: onStreetAddressChanged,
+                decoration: InputDecoration(
+                  labelText: 'Street Address',
+                  hintText: 'House number, street, subdivision',
+                  prefixIcon: const Icon(Icons.streetview, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: landmarkController,
+                onChanged: onLandmarkChanged,
+                decoration: InputDecoration(
+                  labelText: 'Landmark (Optional)',
+                  hintText: 'e.g., Near Antipolo Cathedral, beside SM Cherry',
+                  prefixIcon: const Icon(Icons.flag, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+            ] else ...[
+              _buildInfoRow('Barangay', profile.barangay ?? 'Not set'),
+              const SizedBox(height: 12),
+              _buildInfoRow('Street Address', profile.streetAddress ?? 'Not set'),
+              if (profile.landmark != null && profile.landmark!.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _buildInfoRow('Landmark', profile.landmark!),
+              ],
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, size: 16, color: Color(0xFFDC2626)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Postal Code: 1870',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey[700],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF666666),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Emergency Contact Section
+class EmergencyContactSection extends StatelessWidget {
+  final bool isEditing;
+  final UserProfile profile;
+  final TextEditingController emergencyNameController;
+  final TextEditingController emergencyPhoneController;
+  final TextEditingController emergencyRelationshipController;
+  final Function(String) onEmergencyNameChanged;
+  final Function(String) onEmergencyPhoneChanged;
+  final Function(String) onEmergencyRelationshipChanged;
+  final VoidCallback onInfoPressed;
+
+  const EmergencyContactSection({
+    super.key,
+    required this.isEditing,
+    required this.profile,
+    required this.emergencyNameController,
+    required this.emergencyPhoneController,
+    required this.emergencyRelationshipController,
+    required this.onEmergencyNameChanged,
+    required this.onEmergencyPhoneChanged,
+    required this.onEmergencyRelationshipChanged,
+    required this.onInfoPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey[200]!),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.emergency, size: 20, color: Color(0xFFDC2626)),
+                const SizedBox(width: 8),
+                const Text(
+                  'Emergency Contact',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  onPressed: onInfoPressed,
+                  icon: const Icon(Icons.info_outline, size: 18, color: Color(0xFFDC2626)),
+                  constraints: const BoxConstraints(),
+                  padding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (isEditing) ...[
+              TextField(
+                controller: emergencyNameController,
+                onChanged: onEmergencyNameChanged,
+                decoration: InputDecoration(
+                  labelText: 'Contact Name',
+                  hintText: 'Full name of emergency contact',
+                  prefixIcon: const Icon(Icons.person, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: emergencyPhoneController,
+                onChanged: onEmergencyPhoneChanged,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'Contact Phone Number',
+                  hintText: '09XX XXX XXXX',
+                  prefixIcon: const Icon(Icons.phone, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: emergencyRelationshipController,
+                onChanged: onEmergencyRelationshipChanged,
+                decoration: InputDecoration(
+                  labelText: 'Relationship',
+                  hintText: 'e.g., Spouse, Parent, Sibling',
+                  prefixIcon: const Icon(Icons.family_restroom, size: 20),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFDC2626), width: 2),
+                  ),
+                ),
+              ),
+            ] else ...[
+              _buildInfoRow('Name', profile.emergencyContactName ?? 'Not set'),
+              const SizedBox(height: 12),
+              _buildInfoRow('Phone', profile.emergencyContactPhone ?? 'Not set'),
+              const SizedBox(height: 12),
+              _buildInfoRow('Relationship', profile.emergencyContactRelationship ?? 'Not set'),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF666666),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Emergency Modal
+class EmergencyModal extends StatelessWidget {
+  final VoidCallback onClose;
+
+  const EmergencyModal({
+    super.key,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.5,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(20),
+          topRight: Radius.circular(20),
+        ),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                const Icon(Icons.emergency, color: Color(0xFFDC2626), size: 24),
+                const SizedBox(width: 12),
+                const Text(
+                  'Why is Emergency Contact Important?',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  onPressed: onClose,
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'In case of emergencies, we need to have a contact person who can be reached immediately. This information helps us:',
+                    style: TextStyle(fontSize: 14, color: Color(0xFF4B5563)),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildBulletPoint('Quickly notify your family or friends'),
+                  _buildBulletPoint('Provide immediate assistance when needed'),
+                  _buildBulletPoint('Ensure your safety and well-being'),
+                  _buildBulletPoint('Coordinate with local authorities if necessary'),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFEF2F2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      'Please make sure to keep this information updated.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFFDC2626),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBulletPoint(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '• ',
+            style: TextStyle(fontSize: 14, color: Color(0xFFDC2626)),
+          ),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 14, color: Color(0xFF4B5563)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
