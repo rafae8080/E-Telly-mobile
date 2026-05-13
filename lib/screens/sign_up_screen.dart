@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sign_up.dart';
-import '../dbhelper/mongodb.dart';
+import '../services/api_service.dart';
 
 // Antipolo City specific barangays
 final List<Map<String, String>> antipoloBarangays = [
@@ -132,84 +132,44 @@ class _SignUpScreenState extends State<SignUpScreen> {
   }
 
   Future<void> _handleSignUp() async {
-    if (!_validateForm()) {
-      return;
-    }
+    if (!_validateForm()) return;
 
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
-      // Check if email already exists in MongoDB
-      var existingUser = await MongoDatabase.findUserByEmail(
-        _emailController.text.trim().toLowerCase()
+      final response = await ApiService.register(
+        _nameController.text.trim(),
+        _emailController.text.trim().toLowerCase(),
+        _passwordController.text,
       );
-      
-      if (existingUser != null) {
-        _showErrorDialog(
-          'Email Already Registered',
-          'This email is already registered. Please use a different email or sign in.'
+
+      // Store JWT + profile in flutter_secure_storage (same as login)
+      await ApiService.saveLoginData(response);
+
+      // Also persist barangay, street, landmark locally for other screens
+      await _saveUserDataToPreferences();
+
+      if (mounted) {
+        Navigator.pushNamedAndRemoveUntil(
+            context, '/home', (route) => false);
+      }
+    } on ConflictException catch (e) {
+      setState(() => _emailError = e.message);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)),
         );
-        setState(() {
-          _isLoading = false;
-        });
-        return;
       }
-
-      // Combine street details, landmark, and barangay into full address
-      String fullAddress = _streetDetailsController.text.trim();
-      if (_landmarkController.text.trim().isNotEmpty) {
-        fullAddress += ' (Near: ${_landmarkController.text.trim()})';
-      }
-      fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
-
-      // Prepare user data for MongoDB
-      Map<String, dynamic> userData = {
-        'name': _nameController.text.trim(),
-        'email': _emailController.text.trim().toLowerCase(),
-        'password': _passwordController.text,
-        'address': fullAddress,
-        'barangay': _selectedBarangay!.trim(),
-        'streetDetails': _streetDetailsController.text.trim(),
-        'landmark': _landmarkController.text.trim(),
-        'region': 'CALABARZON (Region IV-A)',
-        'province': 'Rizal',
-        'city': 'Antipolo City',
-        'postalCode': '1870',
-        'isActive': true,
-        'role': 'resident',
-        'createdAt': DateTime.now().toIso8601String(),
-        'emailVerified': false,
-      };
-
-      // Insert user to MongoDB
-      bool success = await MongoDatabase.insertUser(userData);
-
-      if (success) {
-        // Save user data to SharedPreferences
-        await _saveUserDataToPreferences();
-        
-        // Show success dialog
-        _showSuccessDialog();
-      } else {
-        _showErrorDialog(
-          'Registration Failed',
-          'Failed to create account. Please try again.'
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Something went wrong. Please try again.')),
         );
-        setState(() {
-          _isLoading = false;
-        });
       }
-    } catch (error) {
-      print('Signup error: $error');
-      _showErrorDialog(
-        'Registration Error',
-        'An unexpected error occurred. Please try again.'
-      );
-      setState(() {
-        _isLoading = false;
-      });
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -244,84 +204,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
     } catch (error) {
       print('Error saving to SharedPreferences: $error');
     }
-  }
-
-  void _showSuccessDialog() {
-    String fullAddress = _streetDetailsController.text.trim();
-    if (_landmarkController.text.trim().isNotEmpty) {
-      fullAddress += ' (Near: ${_landmarkController.text.trim()})';
-    }
-    fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text(
-          'Registration Successful!',
-          style: TextStyle(color: Colors.green),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Welcome to E-Telly, ${_nameController.text.trim()}!'),
-            const SizedBox(height: 10),
-            Text('Email: ${_emailController.text.trim()}'),
-            Text('Location: Antipolo City'),
-            Text('Barangay: ${_selectedBarangay!.trim()}'),
-            Text('Address: $fullAddress'),
-            const SizedBox(height: 15),
-            const Text(
-              'Please check your email to verify your account before signing in.',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              
-              if (widget.onSignUpSuccess != null) {
-                widget.onSignUpSuccess!();
-              } else if (widget.onLoginPressed != null) {
-                widget.onLoginPressed!();
-              } else {
-                Navigator.pop(context);
-              }
-            },
-            child: const Text(
-              'Sign In',
-              style: TextStyle(color: Colors.blue),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showErrorDialog(String title, String message) {
-    setState(() {
-      _isLoading = false;
-    });
-    
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          title,
-          style: const TextStyle(color: Colors.red),
-        ),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _updateField(String field, String value) {

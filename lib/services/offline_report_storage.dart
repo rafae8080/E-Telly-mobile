@@ -1,5 +1,6 @@
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'api_service.dart';
 
 class OfflineReportStorage {
   static const String boxName = 'emergency_reports';
@@ -146,28 +147,58 @@ class OfflineReportStorage {
     return getUnsyncedReports().length;
   }
 
+  static String _mapEmergencyType(String type) {
+    const valid = {'flood', 'fire', 'earthquake', 'landslide', 'typhoon', 'medical', 'other'};
+    final t = type.toLowerCase();
+    return valid.contains(t) ? t : 'other';
+  }
+
+  static Map<String, dynamic> _buildApiPayload(Map<String, dynamic> report) {
+    final loc = (report['location'] as Map?)?.cast<String, dynamic>() ?? {};
+    final userData = (report['userData'] as Map?)?.cast<String, dynamic>() ?? {};
+
+    final street = loc['street'] as String? ?? '';
+    final barangay = loc['barangay'] as String? ?? '';
+    final city = loc['city'] as String? ?? '';
+    final address = [street, barangay, city].where((s) => s.isNotEmpty).join(', ');
+    final exactAddress = loc['exactAddress'] as String? ?? address;
+
+    return {
+      'emergencyType': _mapEmergencyType(report['emergencyType'] as String? ?? 'other'),
+      'severity': ((report['severity'] as String?) ?? 'medium').toLowerCase(),
+      'description': report['description'] ?? '',
+      'location': {
+        'barangay': barangay,
+        'address': address.isNotEmpty ? address : exactAddress,
+        'exactAddress': exactAddress,
+      },
+      'latitude': loc['latitude'] ?? 0.0,
+      'longitude': loc['longitude'] ?? 0.0,
+      'userName': userData['fullName'] as String? ?? 'Anonymous',
+      'phoneNumber': userData['phoneNumber'] as String? ?? '',
+      'images': <String>[],
+    };
+  }
+
   static Future<void> syncReportsToServer() async {
+    final connectivity = await Connectivity().checkConnectivity();
+    if (connectivity == ConnectivityResult.none) return;
+
     final unsynced = getUnsyncedReports();
     if (unsynced.isEmpty) return;
-    
+
     print('Syncing ${unsynced.length} reports to server...');
-    
-    for (int i = 0; i < unsynced.length; i++) {
-      final report = unsynced[i];
+
+    final allReports = getAllReports();
+    for (final report in unsynced) {
+      final index = allReports.indexWhere((r) => r['id'] == report['id']);
+      if (index == -1) continue;
       try {
-        final allReports = getAllReports();
-        final index = allReports.indexWhere((r) => 
-            r['id'] == report['id']);
-        
-        if (index != -1) {
-          // TODO: Send to your backend/server
-          // await sendToServer(report);
-          
-          await markAsSynced(index);
-          print('Report synced: ${report['title']}');
-        }
+        await ApiService.submitReport(_buildApiPayload(report));
+        await markAsSynced(index);
+        print('Report synced: ${report['id']}');
       } catch (e) {
-        print('Failed to sync report: $e');
+        print('Failed to sync report ${report['id']}: $e');
       }
     }
   }

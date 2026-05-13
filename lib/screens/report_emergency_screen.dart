@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../widgets/custom_font.dart';
 import '../widgets/report.dart';
-import '../dbhelper/mongodb.dart';
+import '../services/api_service.dart';
 
 // Update UserData class to include email
 class UserData {
@@ -124,7 +125,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   void initState() {
     super.initState();
     _loadUserData();
-    _connectToMongoDB();
     _getCurrentLocation();
   }
 
@@ -132,15 +132,6 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   void dispose() {
     _descriptionController.dispose();
     super.dispose();
-  }
-
-  Future<void> _connectToMongoDB() async {
-    try {
-      await MongoDatabase.connect();
-      print('MongoDB connection initialized');
-    } catch (e) {
-      print('Error connecting to MongoDB: $e');
-    }
   }
 
   // Get severity color
@@ -233,10 +224,14 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
 
   Future<void> _loadUserData() async {
     try {
+      const storage = FlutterSecureStorage();
+      final secureUser = await storage.read(key: 'user_name');
+
       final prefs = await SharedPreferences.getInstance();
       setState(() {
         _userData = UserData(
-          fullName: prefs.getString('full_name'),
+          // Prefer the JWT-stored name; fall back to SharedPreferences
+          fullName: secureUser ?? prefs.getString('full_name'),
           email: prefs.getString('email'),
           address: prefs.getString('address'),
           phoneNumber: prefs.getString('phone_number'),
@@ -354,23 +349,36 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     }
   }
 
+  // Maps the mobile emergencyType id to the API's accepted enum values.
+  String _mapEmergencyType(String type) {
+    const valid = {'flood', 'fire', 'earthquake', 'landslide', 'typhoon', 'medical', 'other'};
+    final t = type.toLowerCase();
+    return valid.contains(t) ? t : 'other';
+  }
+
   Future<void> _sendToServer(Map<String, dynamic> report) async {
-    try {
-      if (MongoDatabase.db == null) {
-        await MongoDatabase.connect();
-      }
-      
-      bool success = await MongoDatabase.saveEmergencyReport(report);
-      
-      if (!success) {
-        throw Exception('Failed to save report to database');
-      }
-      
-      print('Report successfully saved to MongoDB');
-    } catch (e) {
-      print('Error sending to server: $e');
-      rethrow;
-    }
+    final lat = _currentPosition?.latitude ?? 0.0;
+    final lng = _currentPosition?.longitude ?? 0.0;
+
+    final address = [_street, _barangay, _city].where((s) => s.isNotEmpty).join(', ');
+
+    final payload = {
+      'emergencyType': _mapEmergencyType(report['emergencyType'] as String),
+      'severity': (report['severity'] as String).toLowerCase(),
+      'description': report['description'] ?? '',
+      'location': {
+        'barangay': _barangay,
+        'address': address.isNotEmpty ? address : _exactAddress,
+        'exactAddress': _exactAddress.isNotEmpty ? _exactAddress : address,
+      },
+      'latitude': lat,
+      'longitude': lng,
+      'userName': _userData.fullName ?? 'Anonymous',
+      'phoneNumber': _userData.phoneNumber ?? '',
+      'images': <String>[],
+    };
+
+    await ApiService.submitReport(payload);
   }
 
   void _showSuccessDialog() {

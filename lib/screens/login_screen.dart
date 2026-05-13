@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 import '../widgets/login.dart';
 import '../dbhelper/mongodb.dart';
+import '../services/api_service.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback? onLoginSuccess;
@@ -49,9 +51,22 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _checkAutoLogin() async {
     try {
+      // Check for persisted JWT (email login via REST API)
+      const storage = FlutterSecureStorage();
+      final token = await storage.read(key: 'auth_token');
+      if (token != null && token.isNotEmpty) {
+        if (widget.onLoginSuccess != null) {
+          widget.onLoginSuccess!();
+        } else {
+          Navigator.pushNamedAndRemoveUntil(context, '/home', (route) => false);
+        }
+        return;
+      }
+
+      // Google auto-login check
       final prefs = await SharedPreferences.getInstance();
       bool isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
-      
+
       if (isLoggedIn) {
         String? authProvider = prefs.getString('authProvider');
         if (authProvider == 'google') {
@@ -104,9 +119,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _handleLogin() async {
-    if (!_validateForm()) {
-      return;
-    }
+    if (!_validateForm()) return;
 
     setState(() {
       _isLoading = true;
@@ -114,46 +127,35 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      if (!await _ensureMongoConnected()) {
-        setState(() {
-          _generalError = 'Unable to connect to the server. Please try again in a moment.';
-        });
-        return;
-      }
-
-      var user = await MongoDatabase.findUserForLogin(
+      final response = await ApiService.login(
         _emailController.text.trim().toLowerCase(),
         _passwordController.text,
       );
 
-      if (user != null) {
-        print('User logged in: ${user['email']}');
+      // Store JWT + profile in flutter_secure_storage
+      await ApiService.saveLoginData(response);
 
-        final userData = {
-          'id': user['_id'].toString(),
-          'name': user['name'] ?? '',
-          'email': user['email'] ?? '',
-          'address': user['address'] ?? '',
-          'barangay': user['barangay'] ?? '',
-          'streetDetails': user['streetDetails'] ?? '',
-          'isSafe': true,
-          'role': user['role'] ?? 'user',
-          'authProvider': 'email',
-        };
+      final user = response['user'] as Map<String, dynamic>;
 
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('userData', jsonEncode(userData));
-        await prefs.setBool('isLoggedIn', true);
-        await prefs.setString('userEmail', user['email']);
-        await prefs.setString('userName', user['name']);
-        await prefs.setString('authProvider', 'email');
+      // Keep SharedPreferences in sync for screens not yet migrated
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('userData', jsonEncode({
+        'id': user['id']?.toString() ?? '',
+        'name': user['name'] ?? '',
+        'email': user['email'] ?? '',
+        'role': user['role'] ?? 'user',
+        'authProvider': 'email',
+      }));
+      await prefs.setBool('isLoggedIn', true);
+      await prefs.setString('userEmail', user['email'] ?? '');
+      await prefs.setString('userName', user['name'] ?? '');
+      await prefs.setString('authProvider', 'email');
 
-        _showSuccessDialog(user['name'] ?? 'User');
-      } else {
-        setState(() {
-          _generalError = 'Invalid email or password. Please try again.';
-        });
-      }
+      _showSuccessDialog(user['name'] ?? 'User');
+    } on ApiException catch (e) {
+      setState(() {
+        _generalError = e.message;
+      });
     } catch (error) {
       print('Login error: $error');
       setState(() {

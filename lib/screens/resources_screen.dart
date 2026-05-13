@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../widgets/resources.dart' as resources;
+import '../services/api_service.dart';
 
 class ResourceItem {
   final String id;
@@ -32,6 +35,7 @@ class MyRequest {
   final String status;
   final String date;
   final String type;
+  final String? referenceCode;
 
   MyRequest({
     required this.id,
@@ -42,6 +46,7 @@ class MyRequest {
     required this.status,
     required this.date,
     required this.type,
+    this.referenceCode,
   });
 }
 
@@ -63,16 +68,25 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   bool _urgent = false;
   String _notes = '';
   bool _showModal = false;
+  bool _isSubmitting = false;
 
-  final List<MyRequest> _myRequests = [];
+  // User profile (loaded from secure storage / SharedPreferences)
+  String _userName = '';
+  String _userEmail = '';
+
+  // Location (read from stored profile; set during sign-up)
+  String _barangay = '';
+  String _detailedAddress = '';
+
+  List<MyRequest> _myRequests = [];
   final ScrollController _scrollController = ScrollController();
 
-  // Donatable Items
+  // Donable items — hardcoded (user can donate anything)
   final List<ResourceItem> _donatableItems = [
     ResourceItem(
       id: 'd1',
       name: 'Clothes',
-      category: 'clothes',
+      category: 'clothing',
       description: 'Clean and wearable clothes for all ages',
       icon: Icons.checkroom,
       available: true,
@@ -99,7 +113,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: 'd4',
       name: 'Blankets',
-      category: 'clothes',
+      category: 'shelter',
       description: 'Clean blankets for warmth',
       icon: Icons.bed,
       available: true,
@@ -108,7 +122,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: 'd5',
       name: 'First Aid Supplies',
-      category: 'kit',
+      category: 'medicine',
       description: 'Bandages, antiseptics, basic medicines',
       icon: Icons.medical_services,
       available: true,
@@ -117,7 +131,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: 'd6',
       name: 'Hygiene Kits',
-      category: 'other',
+      category: 'hygiene',
       description: 'Soap, toothpaste, sanitary products',
       icon: Icons.clean_hands,
       available: true,
@@ -144,7 +158,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: 'd9',
       name: 'Flashlights',
-      category: 'kit',
+      category: 'other',
       description: 'Working flashlights with batteries',
       icon: Icons.flashlight_on,
       available: true,
@@ -153,7 +167,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: 'd10',
       name: 'Emergency Tools',
-      category: 'kit',
+      category: 'other',
       description: 'Whistles, multi-tools, rope',
       icon: Icons.build,
       available: true,
@@ -161,8 +175,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ),
   ];
 
-  // Requestable Items
-  final List<ResourceItem> _requestableItems = [
+  // Requestable items — populated from GET /api/inventory; fallback hardcoded
+  List<ResourceItem> _requestableItems = [
     ResourceItem(
       id: '1',
       name: 'Drinking Water',
@@ -186,7 +200,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '3',
       name: 'Emergency Clothes Set',
-      category: 'clothes',
+      category: 'clothing',
       description:
           'Complete set of emergency clothing (shirt, pants, underwear)',
       icon: Icons.checkroom,
@@ -197,7 +211,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '4',
       name: 'Basic Emergency Kit',
-      category: 'kit',
+      category: 'other',
       description: 'First aid, flashlight, whistle, thermal blanket, batteries',
       icon: Icons.medical_services,
       available: true,
@@ -227,7 +241,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '7',
       name: 'Warm Blankets',
-      category: 'clothes',
+      category: 'shelter',
       description: 'Thermal emergency blankets for cold weather',
       icon: Icons.bed,
       available: true,
@@ -237,7 +251,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '8',
       name: 'Advanced First Aid Kit',
-      category: 'kit',
+      category: 'medicine',
       description:
           'Complete medical supplies including bandages, antiseptics, medicines',
       icon: Icons.medical_information,
@@ -248,7 +262,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '9',
       name: 'Infant Survival Kit',
-      category: 'kit',
+      category: 'other',
       description: 'Baby formula, diapers, clothes, and essential supplies',
       icon: Icons.child_care,
       available: true,
@@ -258,7 +272,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ResourceItem(
       id: '10',
       name: 'Hygiene Kit',
-      category: 'other',
+      category: 'hygiene',
       description: 'Soap, toothpaste, sanitary pads, toilet paper',
       icon: Icons.clean_hands,
       available: true,
@@ -267,18 +281,229 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     ),
   ];
 
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeData();
+  }
+
+  Future<void> _initializeData() async {
+    await _loadUserProfile();
+    await _fetchInventoryItems();
+    await _loadMyRequests();
+  }
+
+  // ── Data loading ───────────────────────────────────────────────────────────
+
+  Future<void> _loadUserProfile() async {
+    try {
+      final storage = FlutterSecureStorage();
+      final results = await Future.wait([
+        storage.read(key: 'user_name'),
+        storage.read(key: 'user_email'),
+      ]);
+      final secName = results[0];
+      final secEmail = results[1];
+
+      final prefs = await SharedPreferences.getInstance();
+      final barangay = prefs.getString('barangay') ?? '';
+      final address = prefs.getString('street_address') ??
+          prefs.getString('address') ??
+          '';
+
+      if (mounted) {
+        setState(() {
+          _userName = secName ?? prefs.getString('userName') ?? '';
+          _userEmail = secEmail ?? prefs.getString('userEmail') ?? '';
+          _barangay = barangay;
+          _detailedAddress = address;
+        });
+      }
+    } catch (_) {
+      // anonymous fallback applies in submit methods
+    }
+  }
+
+  Future<void> _fetchInventoryItems() async {
+    try {
+      final barangayKey = _barangay.isNotEmpty
+          ? _barangay.toLowerCase().replaceAll(' ', '')
+          : 'bagongnayon';
+
+      final items = await ApiService.fetchInventory(barangayKey);
+
+      if (items.isEmpty || !mounted) return;
+
+      final List<ResourceItem> fetched = items.map((item) {
+        final id = item['_id'] as String;
+        final name = item['name'] as String? ?? '';
+        final apiCategory = item['category'] as String? ?? '';
+        final unit = item['unit'] as String? ?? 'item';
+
+        return ResourceItem(
+          id: id,
+          name: name,
+          category: _mapCategory(apiCategory, name),
+          description: '',
+          icon: _iconForApiCategory(apiCategory),
+          available: true,
+          estimatedDelivery: 'Subject to availability',
+          unit: unit,
+        );
+      }).toList();
+
+      if (mounted && fetched.isNotEmpty) {
+        setState(() => _requestableItems = fetched);
+      }
+    } on AuthExpiredException {
+      // Token expired — use hardcoded fallback, let protected calls handle redirect
+    } catch (_) {
+      // Network error — keep hardcoded fallback list
+    }
+  }
+
+  Future<void> _loadMyRequests() async {
+    try {
+      final results = await Future.wait([
+        ApiService.getMyRequests(),
+        ApiService.getMyDonations(),
+      ]);
+      final requestsData = results[0];
+      final donationsData = results[1];
+
+      final List<MyRequest> loaded = [];
+
+      for (final r in requestsData) {
+        final id = r['_id'] as String;
+        final apiCategory = r['category'] as String? ?? 'other';
+        final itemDescription = r['itemDescription'] as String? ?? '';
+        final unit = r['unit'] as String? ?? 'item';
+
+        // Add a synthetic lookup entry so MyRequestCard can find the name
+        if (!_requestableItems.any((i) => i.id == id)) {
+          _requestableItems.add(ResourceItem(
+            id: id,
+            name: itemDescription,
+            category: apiCategory,
+            description: '',
+            icon: _iconForApiCategory(apiCategory),
+            available: true,
+            unit: unit,
+          ));
+        }
+
+        loaded.add(MyRequest(
+          id: id,
+          resourceId: id,
+          quantity: (r['quantity'] as num?)?.toInt() ?? 1,
+          urgent: false,
+          notes: r['reason'] as String? ?? '',
+          status: r['status'] as String? ?? 'pending',
+          date: _formatApiDate(r['createdAt'] as String?),
+          type: 'request',
+        ));
+      }
+
+      for (final d in donationsData) {
+        final id = d['_id'] as String;
+        final apiCategory = d['category'] as String? ?? 'other';
+        final itemDescription = d['itemDescription'] as String? ?? '';
+        final unit = d['unit'] as String? ?? 'item';
+
+        // Add a synthetic lookup entry so MyRequestCard can find the name
+        if (!_donatableItems.any((i) => i.id == id)) {
+          _donatableItems.add(ResourceItem(
+            id: id,
+            name: itemDescription,
+            category: apiCategory,
+            description: '',
+            icon: _iconForApiCategory(apiCategory),
+            available: true,
+            unit: unit,
+          ));
+        }
+
+        loaded.add(MyRequest(
+          id: id,
+          resourceId: id,
+          quantity: (d['quantity'] as num?)?.toInt() ?? 1,
+          urgent: false,
+          notes: '',
+          status: d['status'] as String? ?? 'offered',
+          date: _formatApiDate(d['createdAt'] as String?),
+          type: 'donation',
+          referenceCode: d['referenceCode'] as String?,
+        ));
+      }
+
+      if (mounted) setState(() => _myRequests = loaded);
+    } on AuthExpiredException {
+      // Token expired — leave list empty; login redirect handled elsewhere
+    } catch (_) {
+      // Network error — show empty state
+    }
+  }
+
+  // ── Category / icon helpers ────────────────────────────────────────────────
+
+  // Maps inventory API category values to the community API enum.
+  String _mapCategory(String inventoryCategory, String itemName) {
+    if (inventoryCategory.toLowerCase() == 'food & water') {
+      final nameLower = itemName.toLowerCase();
+      if (nameLower.contains('water') || nameLower.contains('drink')) {
+        return 'water';
+      }
+      return 'food';
+    }
+    switch (inventoryCategory.toLowerCase()) {
+      case 'medical':
+        return 'medicine';
+      case 'shelter':
+        return 'shelter';
+      case 'clothing':
+        return 'clothing';
+      case 'hygiene':
+        return 'hygiene';
+      default:
+        return 'other';
+    }
+  }
+
+  IconData _iconForApiCategory(String category) {
+    switch (category.toLowerCase()) {
+      case 'food & water':
+        return Icons.restaurant;
+      case 'medical':
+        return Icons.medical_services;
+      case 'shelter':
+        return Icons.home;
+      case 'clothing':
+        return Icons.checkroom;
+      case 'hygiene':
+        return Icons.clean_hands;
+      default:
+        return Icons.inventory;
+    }
+  }
+
+  // ── UI helpers ─────────────────────────────────────────────────────────────
+
   Color _getDonateCategoryColor(String category) {
     switch (category) {
       case 'water':
         return const Color(0xFF06B6D4);
       case 'food':
         return const Color(0xFFF59E0B);
-      case 'clothes':
+      case 'clothing':
         return const Color(0xFF10B981);
-      case 'kit':
-        return const Color(0xFF8B5CF6);
-      case 'other':
+      case 'medicine':
         return const Color(0xFFDC2626);
+      case 'shelter':
+        return const Color(0xFF8B5CF6);
+      case 'hygiene':
+        return const Color(0xFF3B82F6);
       default:
         return const Color(0xFF666666);
     }
@@ -290,12 +515,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         return const Color(0xFF3B82F6);
       case 'food':
         return const Color(0xFFF59E0B);
-      case 'clothes':
+      case 'clothing':
         return const Color(0xFF10B981);
-      case 'kit':
+      case 'medicine':
         return const Color(0xFFDC2626);
-      case 'other':
+      case 'shelter':
         return const Color(0xFF8B5CF6);
+      case 'hygiene':
+        return const Color(0xFF06B6D4);
       default:
         return const Color(0xFF666666);
     }
@@ -307,12 +534,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         return Icons.water_drop;
       case 'food':
         return Icons.restaurant;
-      case 'clothes':
+      case 'clothing':
         return Icons.checkroom;
-      case 'kit':
+      case 'medicine':
         return Icons.medical_services;
-      case 'other':
-        return Icons.inventory;
+      case 'shelter':
+        return Icons.home;
+      case 'hygiene':
+        return Icons.clean_hands;
       default:
         return Icons.inventory;
     }
@@ -324,16 +553,32 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         return 'Water';
       case 'food':
         return 'Food';
-      case 'clothes':
-        return 'Clothes';
-      case 'kit':
-        return 'Emergency Kit';
-      case 'other':
-        return 'Other Supplies';
+      case 'clothing':
+        return 'Clothing';
+      case 'medicine':
+        return 'Medical';
+      case 'shelter':
+        return 'Shelter';
+      case 'hygiene':
+        return 'Hygiene';
       default:
-        return category;
+        return 'Other Supplies';
     }
   }
+
+  String _formatApiDate(String? isoString) {
+    if (isoString == null) return '';
+    try {
+      final dt = DateTime.parse(isoString).toLocal();
+      return '${dt.month}/${dt.day}/${dt.year} '
+          '${dt.hour.toString().padLeft(2, '0')}:'
+          '${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return isoString;
+    }
+  }
+
+  // ── Selection handlers ────────────────────────────────────────────────────
 
   void _handleDonationSelect(String resourceId) {
     if (_activeTab == 'donate') {
@@ -363,7 +608,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     }
   }
 
-  void _handleSubmitDonation() {
+  // ── Submit handlers ───────────────────────────────────────────────────────
+
+  Future<void> _handleSubmitDonation() async {
     if (_selectedResource == null) return;
 
     final resource = _donatableItems.firstWhere(
@@ -372,50 +619,60 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     );
 
     final qty = int.tryParse(_quantity) ?? 1;
-
     if (qty < 1) {
       _showAlert('Error', 'Quantity must be at least 1');
       return;
     }
 
-    final newDonation = MyRequest(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      resourceId: _selectedResource!,
-      quantity: qty,
-      urgent: _urgent,
-      notes: _notes.trim(),
-      status: 'pending',
-      date: _formatDateTime(DateTime.now()),
-      type: 'donation',
-    );
+    final donorName = _userName.isNotEmpty ? _userName : 'Anonymous Donor';
+    final donorEmail =
+        _userEmail.isNotEmpty ? _userEmail : 'anonymous@donation.com';
+    final barangay = _barangay.isNotEmpty ? _barangay : 'Bagong Nayon';
 
-    setState(() {
-      _myRequests.insert(0, newDonation);
-    });
+    setState(() => _isSubmitting = true);
 
-    _showAlert(
-      'Donation Submitted!',
-      'Thank you for your generous donation of $qty ${resource.name}${qty > 1 ? 's' : ''}!\n\n'
-          'DRRMO will contact you for pickup arrangements.\n'
-          '${_urgent ? '🚨 URGENT DONATION - Priority pickup' : ''}',
-      onOk: () {
-        setState(() {
-          _showModal = false;
-          _quantity = '1';
-          _urgent = false;
-          _notes = '';
-          _selectedResource = null;
-        });
-        Future.delayed(const Duration(milliseconds: 300), () {
+    try {
+      final response = await ApiService.submitDonation({
+        'donorName': donorName,
+        'donorEmail': donorEmail,
+        'barangay': barangay,
+        'category': resource.category,
+        'itemDescription': resource.name,
+        'quantity': qty,
+        'unit': resource.unit ?? 'item',
+      });
+
+      final donation = response['donation'] as Map<String, dynamic>?;
+      final referenceCode = donation?['referenceCode'] as String?;
+
+      _showAlert(
+        'Donation Submitted!',
+        'Thank you for your generous donation of $qty ${resource.name}'
+            '${qty > 1 ? 's' : ''}!\n\n'
+            'DRRMO will contact you for pickup arrangements.'
+            '${referenceCode != null ? '\n\nReference: $referenceCode' : ''}',
+        onOk: () {
           setState(() {
-            _activeTab = 'myRequests';
+            _showModal = false;
+            _quantity = '1';
+            _urgent = false;
+            _notes = '';
+            _selectedResource = null;
           });
-        });
-      },
-    );
+          _loadMyRequests();
+          Future.delayed(const Duration(milliseconds: 300), () {
+            if (mounted) setState(() => _activeTab = 'myRequests');
+          });
+        },
+      );
+    } on ApiException catch (e) {
+      _showAlert('Error', e.message);
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
   }
 
-  void _handleSubmitRequest() {
+  Future<void> _handleSubmitRequest() async {
     if (_selectedResource == null) return;
 
     final resource = _requestableItems.firstWhere(
@@ -424,66 +681,76 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     );
 
     final qty = int.tryParse(_quantity) ?? 1;
-
     if (qty < 1) {
       _showAlert('Error', 'Quantity must be at least 1');
       return;
     }
 
-    if (!resource.available) {
+    final requesterName = _userName.isNotEmpty ? _userName : 'Anonymous';
+    final requesterEmail =
+        _userEmail.isNotEmpty ? _userEmail : 'anonymous@request.com';
+    final barangay = _barangay.isNotEmpty ? _barangay : 'Bagong Nayon';
+    final address = _detailedAddress.isNotEmpty ? _detailedAddress : barangay;
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      await ApiService.submitRequest({
+        'requesterName': requesterName,
+        'requesterEmail': requesterEmail,
+        'barangay': barangay,
+        'address': address,
+        'category': resource.category,
+        'itemDescription': resource.name,
+        'quantity': qty,
+        'unit': resource.unit ?? 'item',
+        'reason': _notes.trim(),
+      });
+
       _showAlert(
-        'Not Available',
-        'Sorry, ${resource.name} is currently out of stock.',
-      );
-      return;
-    }
-
-    final newRequest = MyRequest(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      resourceId: _selectedResource!,
-      quantity: qty,
-      urgent: _urgent,
-      notes: _notes.trim(),
-      status: 'pending',
-      date: _formatDateTime(DateTime.now()),
-      type: 'request',
-    );
-
-    setState(() {
-      _myRequests.insert(0, newRequest);
-    });
-
-    _showAlert(
-      'Request Submitted!',
-      'Your request for $qty ${resource.name}${qty > 1 ? 's' : ''} has been submitted.\n\n'
-          'Estimated delivery: ${resource.estimatedDelivery}\n'
-          '${_urgent ? '🚨 URGENT REQUEST - Priority handling' : ''}',
-      onOk: () {
-        setState(() {
-          _showModal = false;
-          _quantity = '1';
-          _urgent = false;
-          _notes = '';
-          _selectedResource = null;
-        });
-        Future.delayed(const Duration(milliseconds: 300), () {
+        'Request Submitted!',
+        'Your request has been submitted and will be reviewed by CDRRMO.',
+        onOk: () {
           setState(() {
-            _activeTab = 'myRequests';
+            _showModal = false;
+            _quantity = '1';
+            _urgent = false;
+            _notes = '';
+            _selectedResource = null;
           });
-        });
-      },
-    );
+          _loadMyRequests();
+          Future.delayed(const Duration(milliseconds: 300), () {
+            if (mounted) setState(() => _activeTab = 'myRequests');
+          });
+        },
+      );
+    } on ConflictException catch (e) {
+      _showAlert('Already Requested', e.message);
+    } on ApiException catch (e) {
+      _showAlert('Error', e.message);
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
   }
 
   void _handleCancelRequest(String requestId) {
     _showConfirmDialog(
       'Cancel',
       'Are you sure you want to cancel this?',
-      onConfirm: () {
-        setState(() {
-          _myRequests.removeWhere((r) => r.id == requestId);
-        });
-        _showAlert('Cancelled', 'Your item has been cancelled.');
+      onConfirm: () async {
+        try {
+          final item =
+              _myRequests.firstWhere((r) => r.id == requestId);
+          if (item.type == 'donation') {
+            await ApiService.cancelDonation(requestId);
+          } else {
+            await ApiService.cancelRequest(requestId);
+          }
+          await _loadMyRequests();
+          if (mounted) _showAlert('Cancelled', 'Your item has been cancelled.');
+        } on ApiException catch (e) {
+          if (mounted) _showAlert('Error', e.message);
+        }
       },
     );
   }
@@ -543,7 +810,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   }
 
   String _formatDateTime(DateTime date) {
-    return '${date.month}/${date.day}/${date.year} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+    return '${date.month}/${date.day}/${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:'
+        '${date.minute.toString().padLeft(2, '0')}';
   }
 
   void _showAlert(String title, String message, {VoidCallback? onOk}) {

@@ -1,6 +1,10 @@
 
-
 import 'package:flutter/material.dart';
+
+const bool kDevMode = false;
+const String baseUrl = kDevMode
+    ? 'http://192.168.x.x:5000'
+    : 'https://e-telly-ca75b10e9536.herokuapp.com';
 
 const Color ET_RED = Color(0xFFDC2626);
 const Color ET_BLUE = Color(0xFF3B82F6);
