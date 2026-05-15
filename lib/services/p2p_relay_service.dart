@@ -1,0 +1,398 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart';
+import 'package:nearby_connections/nearby_connections.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'internet_checker_service.dart'; 
+import 'relay_queue_manager.dart';
+
+// ── Event models ─────────────────────────────────────────────────────────────
+
+enum PeerState { discovered, connecting, connected, disconnected }
+
+class PeerDevice {
+  final String endpointId;
+  final String endpointName;
+  PeerState state;
+  int reportsSent;
+  int reportsReceived;
+
+  PeerDevice({
+    required this.endpointId,
+    required this.endpointName,
+    this.state = PeerState.discovered,
+    this.reportsSent = 0,
+    this.reportsReceived = 0,
+  });
+}
+
+enum TransferState { idle, sending, receiving, done, error }
+
+class TransferProgress {
+  final TransferState state;
+  final int total;
+  final int current;
+  final String? message;
+
+  const TransferProgress({
+    required this.state,
+    this.total = 0,
+    this.current = 0,
+    this.message,
+  });
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+/// Manages peer-to-peer report relay using Google Nearby Connections.
+///
+/// Typical flow:
+///   1. Caller invokes [startAdvertisingAndDiscovery].
+///   2. [onPeersChanged] fires whenever the nearby-device list updates.
+///   3. Caller invokes [connectAndSend] with a chosen [endpointId].
+///   4. [onTransferProgress] fires throughout the transfer.
+///   5. Caller invokes [stop] when the screen is closed.
+class P2PRelayService {
+  // ── Singleton ───────────────────────────────────────────────────────────────
+  P2PRelayService._();
+  static final P2PRelayService instance = P2PRelayService._();
+
+  // ── Constants ───────────────────────────────────────────────────────────────
+  static const String _serviceId = 'com.android.application.etelly.relay';
+  static const Strategy _strategy = Strategy.P2P_CLUSTER;
+
+  // ── State ────────────────────────────────────────────────────────────────────
+  String? _localDeviceId;
+  String? _localDeviceName;
+  bool _isRunning = false;
+
+  final Map<String, PeerDevice> _peers = {};
+
+  // ── Callbacks (set by the UI layer) ──────────────────────────────────────────
+
+  /// Called whenever the peer list changes (device found / lost / state change).
+  void Function(List<PeerDevice>)? onPeersChanged;
+
+  /// Called with progress updates during a send/receive operation.
+  void Function(TransferProgress)? onTransferProgress;
+
+  /// Called when a report is successfully received from a peer.
+  void Function(String reportId)? onReportReceived;
+
+  // ── Public API ────────────────────────────────────────────────────────────────
+
+  /// Initialises the local device identity from SharedPreferences + DeviceInfo.
+  Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
+    _localDeviceName = prefs.getString('full_name') ?? 'Unknown User';
+
+    final info = DeviceInfoPlugin();
+    final android = await info.androidInfo;
+    _localDeviceId = android.id; // stable hardware ID
+    debugPrint('[P2P] Initialised as "$_localDeviceName" (id: $_localDeviceId)');
+  }
+
+  /// Starts both advertising (so others find us) and discovery (so we find
+  /// others). Safe to call multiple times — stops first if already running.
+  Future<void> startAdvertisingAndDiscovery() async {
+    if (_isRunning) await stop();
+    if (_localDeviceName == null) await init();
+
+    try {
+      await Nearby().startAdvertising(
+        _localDeviceName!,
+        _strategy,
+        onConnectionInitiated: _onConnectionInitiated,
+        onConnectionResult: _onConnectionResult,
+        onDisconnected: _onDisconnected,
+        serviceId: _serviceId,
+      );
+
+      await Nearby().startDiscovery(
+        _localDeviceName!,
+        _strategy,
+        onEndpointFound: _onEndpointFound,
+        onEndpointLost: _onEndpointLost,
+        serviceId: _serviceId,
+      );
+
+      _isRunning = true;
+      debugPrint('[P2P] Advertising + Discovery started.');
+    } catch (e) {
+      debugPrint('[P2P] Failed to start: $e');
+      rethrow;
+    }
+  }
+
+  /// Stops advertising, discovery, and all active connections.
+  Future<void> stop() async {
+    try {
+      await Nearby().stopAdvertising();
+      await Nearby().stopDiscovery();
+      await Nearby().stopAllEndpoints();
+    } catch (_) {}
+    _peers.clear();
+    _isRunning = false;
+    debugPrint('[P2P] Stopped.');
+  }
+
+  /// Connects to [endpointId] and sends all pending relay reports.
+  /// Progress is reported via [onTransferProgress].
+  Future<void> connectAndSend(String endpointId) async {
+    final peer = _peers[endpointId];
+    if (peer == null) return;
+
+    _updatePeerState(endpointId, PeerState.connecting);
+
+    try {
+      await Nearby().requestConnection(
+        _localDeviceName!,
+        endpointId,
+        onConnectionInitiated: _onConnectionInitiated,
+        onConnectionResult: _onConnectionResult,
+        onDisconnected: _onDisconnected,
+      );
+      // Actual sending happens in _onConnectionResult once accepted
+    } catch (e) {
+      debugPrint('[P2P] Connection request failed: $e');
+      _updatePeerState(endpointId, PeerState.discovered);
+      onTransferProgress?.call(TransferProgress(
+        state: TransferState.error,
+        message: 'Connection failed: $e',
+      ));
+    }
+  }
+
+  /// Disconnects from a specific endpoint.
+  Future<void> disconnect(String endpointId) async {
+    try {
+      await Nearby().disconnectFromEndpoint(endpointId);
+    } catch (_) {}
+    _updatePeerState(endpointId, PeerState.disconnected);
+  }
+
+  List<PeerDevice> get peers => List.unmodifiable(_peers.values);
+  bool get isRunning => _isRunning;
+
+  // ── Nearby Connections callbacks ─────────────────────────────────────────────
+
+  void _onEndpointFound(String endpointId, String endpointName, String serviceId) {
+    debugPrint('[P2P] Found peer: $endpointName ($endpointId)');
+    _peers[endpointId] = PeerDevice(
+      endpointId: endpointId,
+      endpointName: endpointName,
+    );
+    _notifyPeersChanged();
+  }
+
+  void _onEndpointLost(String? endpointId) {
+    if (endpointId == null) return;
+    debugPrint('[P2P] Lost peer: $endpointId');
+    _peers.remove(endpointId);
+    _notifyPeersChanged();
+  }
+
+  void _onConnectionInitiated(String endpointId, ConnectionInfo info) {
+    debugPrint('[P2P] Connection initiated with ${info.endpointName}');
+    // Auto-accept all connections from peers running the same app
+    Nearby().acceptConnection(
+      endpointId,
+      onPayLoadRecieved: _onPayloadReceived,
+      onPayloadTransferUpdate: _onPayloadTransferUpdate,
+    );
+    _updatePeerState(endpointId, PeerState.connecting);
+  }
+
+  void _onConnectionResult(String endpointId, Status status) {
+    debugPrint('[P2P] Connection result for $endpointId: $status');
+    if (status == Status.CONNECTED) {
+      _updatePeerState(endpointId, PeerState.connected);
+      // Now that connection is established, send pending reports
+      _sendPendingReports(endpointId);
+    } else {
+      _updatePeerState(endpointId, PeerState.discovered);
+      onTransferProgress?.call(const TransferProgress(
+        state: TransferState.error,
+        message: 'Connection was rejected or failed.',
+      ));
+    }
+  }
+
+  void _onDisconnected(String endpointId) {
+    debugPrint('[P2P] Disconnected from $endpointId');
+    _updatePeerState(endpointId, PeerState.disconnected);
+  }
+
+  void _onPayloadReceived(String endpointId, Payload payload) async {
+    if (payload.type != PayloadType.BYTES) return;
+    final bytes = payload.bytes;
+    if (bytes == null) return;
+
+    try {
+      final jsonString = utf8.decode(bytes);
+
+      // Handle the report-count handshake message
+      if (jsonString.startsWith('__COUNT__:')) {
+        final count = int.tryParse(jsonString.split(':')[1]) ?? 0;
+        debugPrint('[P2P] Peer will send $count report(s).');
+        onTransferProgress?.call(TransferProgress(
+          state: TransferState.receiving,
+          total: count,
+          current: 0,
+          message: 'Receiving $count report(s)…',
+        ));
+        return;
+      }
+
+      // Handle end-of-transfer sentinel
+      if (jsonString == '__DONE__') {
+        final peer = _peers[endpointId];
+        final received = peer?.reportsReceived ?? 0;
+        onTransferProgress?.call(TransferProgress(
+          state: TransferState.done,
+          total: received,
+          current: received,
+          message: 'Received $received report(s) successfully.',
+        ));
+        debugPrint('[P2P] Transfer complete from $endpointId.');
+        return;
+      }
+
+      // It's a report payload
+      final entry = RelayQueueManager.fromTransferJson(jsonString);
+      if (entry != null) {
+        final peerInfo = {
+          'deviceId': endpointId,
+          'deviceName': _peers[endpointId]?.endpointName ?? 'Unknown',
+          'timestamp': DateTime.now().toIso8601String(),
+        };
+        await RelayQueueManager.enqueueRelayed(
+          report: entry.report,
+          peerInfo: peerInfo,
+        );
+        InternetCheckerService.instance.forceFlush();
+
+        _peers[endpointId]?.reportsReceived++;
+        final received = _peers[endpointId]?.reportsReceived ?? 1;
+
+        onReportReceived?.call(entry.reportId);
+        onTransferProgress?.call(TransferProgress(
+          state: TransferState.receiving,
+          total: received,
+          current: received,
+          message: 'Received report ${entry.reportId}',
+        ));
+        debugPrint('[P2P] Stored relayed report: ${entry.reportId}');
+      }
+    } catch (e) {
+      debugPrint('[P2P] Error processing payload: $e');
+    }
+  }
+
+  void _onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {
+    // Nearby Connections fires this for BYTES payloads too, but the
+    // transfer is effectively instant for small JSON. We use our own
+    // __COUNT__ / __DONE__ sentinels for progress instead.
+  }
+
+  // ── Sending logic ────────────────────────────────────────────────────────────
+
+  Future<void> _sendPendingReports(String endpointId) async {
+    final pending = RelayQueueManager.getPending();
+
+    if (pending.isEmpty) {
+      onTransferProgress?.call(const TransferProgress(
+        state: TransferState.done,
+        total: 0,
+        current: 0,
+        message: 'No pending reports to send.',
+      ));
+      await disconnect(endpointId);
+      return;
+    }
+
+    onTransferProgress?.call(TransferProgress(
+      state: TransferState.sending,
+      total: pending.length,
+      current: 0,
+      message: 'Sending ${pending.length} report(s)…',
+    ));
+
+    // Send count handshake first
+    await _sendBytes(endpointId, '__COUNT__:${pending.length}');
+
+    int sent = 0;
+    final peerInfo = {
+      'deviceId': _localDeviceId ?? 'unknown',
+      'deviceName': _localDeviceName ?? 'Unknown',
+      'timestamp': DateTime.now().toIso8601String(),
+    };
+
+    for (final entry in pending) {
+      try {
+        final transfer = RelayQueueManager.prepareForTransfer(entry);
+        final json = jsonEncode(transfer);
+        await _sendBytes(endpointId, json);
+
+        await RelayQueueManager.markAsRelayed(entry.reportId, peerInfo);
+        _peers[endpointId]?.reportsSent++;
+        sent++;
+
+        onTransferProgress?.call(TransferProgress(
+          state: TransferState.sending,
+          total: pending.length,
+          current: sent,
+          message: 'Sent $sent of ${pending.length}…',
+        ));
+
+        // Small gap between payloads to avoid overwhelming the channel
+        await Future.delayed(const Duration(milliseconds: 100));
+      } catch (e) {
+        debugPrint('[P2P] Failed to send report ${entry.reportId}: $e');
+      }
+    }
+
+    // Send end sentinel
+    await _sendBytes(endpointId, '__DONE__');
+
+    onTransferProgress?.call(TransferProgress(
+      state: TransferState.done,
+      total: pending.length,
+      current: sent,
+      message: 'Sent $sent of ${pending.length} report(s).',
+    ));
+
+    debugPrint('[P2P] Sent $sent/${pending.length} reports to $endpointId.');
+    await Future.delayed(const Duration(seconds: 1));
+    await disconnect(endpointId);
+  }
+
+  Future<void> _sendBytes(String endpointId, String data) async {
+    final bytes = Uint8List.fromList(utf8.encode(data));
+    await Nearby().sendBytesPayload(endpointId, bytes);
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  void _updatePeerState(String endpointId, PeerState state) {
+    if (_peers.containsKey(endpointId)) {
+      _peers[endpointId]!.state = state;
+    } else {
+      // Peer may have been discovered by the advertising side, not discovery
+      _peers[endpointId] = PeerDevice(
+        endpointId: endpointId,
+        endpointName: 'Unknown Device',
+        state: state,
+      );
+    }
+    _notifyPeersChanged();
+  }
+
+  void _notifyPeersChanged() {
+    onPeersChanged?.call(List.unmodifiable(_peers.values));
+  }
+}

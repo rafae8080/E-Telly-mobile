@@ -1,4 +1,5 @@
 import 'package:hive_flutter/hive_flutter.dart';
+import 'relay_queue_manager.dart';
 
 class OfflineReportStorage {
   static const String boxName = 'emergency_reports';
@@ -9,6 +10,7 @@ class OfflineReportStorage {
   static Future<void> init() async {
     _box = await Hive.openBox<Map>(boxName);
     _registrationsBox = await Hive.openBox<Map>(registrationsBoxName);
+    await RelayQueueManager.init(); 
     print('OfflineReportStorage initialized');
   }
   

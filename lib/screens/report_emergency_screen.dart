@@ -10,6 +10,9 @@ import 'dart:convert';
 import 'dart:io';
 import '../widgets/custom_font.dart';
 import '../dbhelper/mongodb.dart';
+import '../services/relay_queue_manager.dart';
+import '../services/internet_checker_service.dart';
+import '../screens/p2p_relay_screen.dart';
 
 // Define EmergencyType class
 class EmergencyType {
@@ -254,21 +257,30 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     ),
   ];
 
-  @override
-  void initState() {
-    super.initState();
-    _loadUserData();
-    _loadUserReports();
-    
-    // Add a small delay to ensure UI is ready
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _getCurrentLocation().then((_) {
-        debugPrint('Location loaded successfully');
-      }).catchError((e) {
-        debugPrint('Location loading error: $e');
-      });
+@override
+void initState() {
+  super.initState();
+  _loadUserData();
+  _loadUserReports();
+
+  // Start internet checker — flushes relay queue whenever internet returns
+  InternetCheckerService.instance.start(
+    onCycleComplete: ({required int succeeded, required int failed}) {
+      if (!mounted) return;
+      if (succeeded > 0) {
+        _loadUserReports();
+      }
+    },
+  );
+
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _getCurrentLocation().then((_) {
+      debugPrint('Location loaded successfully');
+    }).catchError((e) {
+      debugPrint('Location loading error: $e');
     });
-  }
+  });
+}
 
   @override
   void dispose() {
@@ -920,6 +932,8 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
       };
       
       await _saveToLocalStorage(report);
+
+      await RelayQueueManager.enqueue(report); 
       
       setState(() {
         _userReports.insert(0, report);
@@ -930,8 +944,11 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
       
       if (mounted) setState(() => _isSubmitting = false);
       
-      _saveToMongoDBInBackground(report);
-      _notifyBackendInBackground(report);
+      //_saveToMongoDBInBackground(report);
+      final isOnline = await InternetCheckerService.instance.forceFlushIfOnline();
+      if (isOnline) {
+        _notifyBackendInBackground(report);
+      }
       _syncReportsToLocalStorage();
       
     } catch (e) {
@@ -982,7 +999,7 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
     try {
       await Future.delayed(const Duration(seconds: 1));
       final response = await http.post(
-        Uri.parse('http://10.0.2.2:5000/api/notify-emergency'),
+        Uri.parse('https://e-telly-ca75b10e9536.herokuapp.com/api/notify-emergency'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'reportId': report['id'],
@@ -1418,6 +1435,74 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
             Text('Attachments: ${_images.length} image(s)', style: TextStyle(fontSize: 12.sp, color: Colors.grey)),
           ],
         ],
+      ),
+    );
+  }
+ 
+  Widget _buildP2PRelayButton() {
+    final pendingCount = RelayQueueManager.pendingCount;
+ 
+    return SizedBox(
+      width: double.infinity,
+      height: 48.h,
+      child: OutlinedButton.icon(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const P2PRelayScreen(),
+            ),
+          ).then((_) {
+            // Refresh reports list when returning from P2P screen
+            _loadUserReports();
+          });
+        },
+        icon: Icon(
+          Icons.bluetooth_searching,
+          size: 18.sp,
+          color: const Color(0xFF06B6D4),
+        ),
+        label: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'Send via P2P',
+              style: TextStyle(
+                fontSize: 13.sp,
+                fontWeight: FontWeight.w600,
+                color: const Color(0xFF06B6D4),
+              ),
+            ),
+            if (pendingCount > 0) ...[
+              SizedBox(width: 8.w),
+              Container(
+                padding: EdgeInsets.symmetric(
+                    horizontal: 7.w, vertical: 2.h),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFDC2626),
+                  borderRadius: BorderRadius.circular(10.r),
+                ),
+                child: Text(
+                  '$pendingCount',
+                  style: TextStyle(
+                    fontSize: 10.sp,
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(
+            color: const Color(0xFF06B6D4).withOpacity(0.5),
+            width: 1.5.w,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12.r),
+          ),
+        ),
       ),
     );
   }
@@ -1867,6 +1952,8 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
                         ),
                 ),
               ),
+              SizedBox(height: 10.h),
+              _buildP2PRelayButton(),
               SizedBox(height: 16.h),
               _buildDisclaimer(),
               SizedBox(height: 20.h),

@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 
 class ApiService {
-  static const String baseUrl = 'http://10.0.2.2:5000'; // Change this
+  static const String baseUrl = 'https://e-telly-ca75b10e9536.herokuapp.com'; // Change this
   final AuthService _authService = AuthService();
   
   // Make authenticated API requests

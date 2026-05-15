@@ -18,6 +18,9 @@ import 'screens/login_screen.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/sign_up_screen.dart';
 import 'screens/profile_screen.dart';
+import 'services/relay_queue_manager.dart';
+import 'services/internet_checker_service.dart';
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -46,7 +49,10 @@ void main() async {
   
   await HiveService.init();
   await OfflineReportStorage.init();
-  
+  await RelayQueueManager.init();
+
+  InternetCheckerService.instance.start();
+
   // CHECK JWT TOKEN
   final authService = AuthService();
   final isJwtValid = await authService.isLoggedIn();
