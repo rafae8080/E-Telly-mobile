@@ -29,7 +29,12 @@ class _LoginScreenState extends State<LoginScreen> {
   final AuthService _authService = AuthService();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: ['email', 'profile']);
+  
+  // ✅ FIXED: Added the Web Client ID from google-services.json
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: ['email', 'profile'],
+    clientId: '927012189317-ljjmpf3d0c4ssatebm8sv3ht0rt9eml3.apps.googleusercontent.com',
+  );
 
   bool _showPassword = false;
   bool _isLoading = false;
@@ -273,6 +278,7 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      // Check Google Play Services availability
       try {
         await _googleSignIn.isSignedIn();
       } catch (e) {
@@ -284,12 +290,14 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
+      // Sign out first to ensure fresh sign-in
       try {
         await _googleSignIn.signOut();
       } catch (e) {
         print('>>> Google sign out error (non-fatal): $e');
       }
 
+      // Trigger Google Sign-in
       final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
       if (!mounted) return;
 
@@ -299,7 +307,10 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       print('>>> Google Sign-In successful: ${googleUser.email}');
+      print('>>> Google User ID: ${googleUser.id}');
+      print('>>> Google Display Name: ${googleUser.displayName}');
 
+      // Ensure MongoDB connection
       if (!await _ensureMongoConnected()) {
         if (!mounted) return;
         setState(() {
@@ -309,6 +320,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
+      // Check if user exists in database
       final existingUser = await MongoDatabase.findUserByEmail(
         googleUser.email.toLowerCase(),
       );
@@ -316,6 +328,8 @@ class _LoginScreenState extends State<LoginScreen> {
       Map<String, dynamic> userData;
 
       if (existingUser != null) {
+        // Existing user - update last login
+        print('>>> Existing user found, updating login info');
         userData = _buildUserData(
           existingUser,
           authProvider: 'google',
@@ -326,8 +340,10 @@ class _LoginScreenState extends State<LoginScreen> {
           'updatedAt': DateTime.now().toIso8601String(),
         });
       } else {
+        // New user - create account
+        print('>>> New user, creating account');
         final newUser = {
-          'name': googleUser.displayName ?? 'Google User',
+          'name': googleUser.displayName ?? googleUser.email.split('@')[0],
           'email': googleUser.email.toLowerCase(),
           'password': 'google_auth_${DateTime.now().millisecondsSinceEpoch}',
           'isActive': true,
@@ -352,8 +368,11 @@ class _LoginScreenState extends State<LoginScreen> {
           'landmark': '',
         };
         await MongoDatabase.insertUser(newUser);
+        
+        // Get the created user with ObjectId
+        final createdUser = await MongoDatabase.findUserByEmail(googleUser.email.toLowerCase());
         userData = _buildUserData(
-          {...newUser, 'id': DateTime.now().millisecondsSinceEpoch.toString()},
+          createdUser ?? newUser,
           authProvider: 'google',
           photoUrl: googleUser.photoUrl,
         );
@@ -363,10 +382,14 @@ class _LoginScreenState extends State<LoginScreen> {
       final jwtToken = JwtService.generateToken(userData);
       print('>>> JWT Token generated, length: ${jwtToken.length}');
 
+      // Save to secure storage using AuthService
       await _authService.saveAuthData(token: jwtToken, userData: userData);
+      
+      // Save to Hive for backup
       await HiveService.setLoggedIn(true);
       await HiveService.saveUserSession(userData);
 
+      // Save to SharedPreferences for legacy compatibility
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('userData', jsonEncode(userData));
       await prefs.setBool('isLoggedIn', true);
@@ -379,8 +402,10 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       print('>>> Google user data saved with JWT token');
+      
       if (!mounted) return;
 
+      // Show success message
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Welcome, ${userData['name']}!'),
@@ -391,14 +416,26 @@ class _LoginScreenState extends State<LoginScreen> {
 
       setState(() => _isLoading = false);
       _navigateToHome();
+      
     } catch (error, stack) {
       print('>>> Google sign-in error: $error');
       print('>>> Stack: $stack');
       if (!mounted) return;
+      
+      // Provide user-friendly error messages
+      String errorMessage;
+      if (error.toString().contains('sign_in_failed')) {
+        errorMessage = 'Google Sign-In failed. Check your internet connection and try again.';
+      } else if (error.toString().contains('network_error')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (error.toString().contains('API_EXCEPTION')) {
+        errorMessage = 'Google Services error. Please update Google Play Services.';
+      } else {
+        errorMessage = 'Google sign-in failed: ${error.toString().split('\n')[0]}';
+      }
+      
       setState(() {
-        _generalError = error.toString().contains('sign_in_failed')
-            ? 'Google Sign-In failed. Check your internet connection and try again.'
-            : 'Google sign-in failed: ${error.toString().split('\n')[0]}';
+        _generalError = errorMessage;
         _isLoading = false;
       });
     }

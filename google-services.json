@@ -1,0 +1,55 @@
+﻿{
+  "project_info": {
+    "project_number": "927012189317",
+    "project_id": "etelly-app",
+    "storage_bucket": "etelly-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:927012189317:android:b07432e2f57fcd2eb765ec",
+        "android_client_info": {
+          "package_name": "com.example.e_telly_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "927012189317-dh5lpl8fcrjvievc9i2e3aem9j0qaafg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.e_telly_app",
+            "certificate_hash": "25140fc9e62445b04ba65c800e38e8ad23b04944"
+          }
+        },
+        {
+          "client_id": "927012189317-ht4mvk8r7bnl72m9b7icpahuqrpt5s3r.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.e_telly_app",
+            "certificate_hash": "f499d3fc2f5ef511a994e255fb50591c8d0a0df8"
+          }
+        },
+        {
+          "client_id": "927012189317-ljjmpf3d0c4ssatebm8sv3ht0rt9eml3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDV25ZeP6G1cbfzUzxsCIBdQ2cTpPrjTr8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "927012189317-ljjmpf3d0c4ssatebm8sv3ht0rt9eml3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

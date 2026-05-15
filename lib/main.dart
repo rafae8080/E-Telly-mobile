@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'services/offline_report_storage.dart';
 import 'services/hive_service.dart';
 import 'services/auth_service.dart';
@@ -20,6 +22,21 @@ import 'screens/profile_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  try {
+    // Initialize Firebase
+    await Firebase.initializeApp();
+    print('Firebase initialized successfully');
+    
+    // Initialize Firebase Messaging
+    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    await messaging.requestPermission();
+    final fcmToken = await messaging.getToken();
+    print('FCM Token: $fcmToken');
+  } catch (e, stack) {
+    print('Firebase initialization error: $e');
+    print('Stack trace: $stack');
+  }
+  
   await ScreenUtil.ensureScreenSize();
   
   await Hive.initFlutter();
@@ -30,7 +47,7 @@ void main() async {
   await HiveService.init();
   await OfflineReportStorage.init();
   
-  // CHECK JWT TOKEN - THIS IS THE KEY
+  // CHECK JWT TOKEN
   final authService = AuthService();
   final isJwtValid = await authService.isLoggedIn();
   
