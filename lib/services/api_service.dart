@@ -3,10 +3,10 @@ import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 
 class ApiService {
-  static const String baseUrl = 'https://e-telly-ca75b10e9536.herokuapp.com'; // Change this
+  static const String baseUrl = 'https://e-telly-ca75b10e9536.herokuapp.com'; 
   final AuthService _authService = AuthService();
   
-  // Make authenticated API requests
+
   Future<http.Response> authenticatedGet(String endpoint) async {
     final token = await _authService.getToken();
     if (token == null) throw Exception('Not authenticated');
