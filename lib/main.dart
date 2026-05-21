@@ -20,17 +20,19 @@ import 'screens/sign_up_screen.dart';
 import 'screens/profile_screen.dart';
 import 'services/relay_queue_manager.dart';
 import 'services/internet_checker_service.dart';
+import 'firebase_options.dart';
 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
   try {
-    // Initialize Firebase
-    await Firebase.initializeApp();
-    print('Firebase initialized successfully');
+  
+ await Firebase.initializeApp(
+  options: DefaultFirebaseOptions.currentPlatform,
+);
     
-    // Initialize Firebase Messaging
+   
     FirebaseMessaging messaging = FirebaseMessaging.instance;
     await messaging.requestPermission();
     final fcmToken = await messaging.getToken();

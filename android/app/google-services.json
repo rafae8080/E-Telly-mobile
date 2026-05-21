@@ -1,4 +1,4 @@
-﻿{
+{
   "project_info": {
     "project_number": "927012189317",
     "project_id": "etelly-app",
@@ -13,6 +13,14 @@
         }
       },
       "oauth_client": [
+        {
+          "client_id": "927012189317-dh5lpl8fcrjvievc9i2e3aem9j0qaafg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.e_telly_app",
+            "certificate_hash": "25140fc9e62445b04ba65c800e38e8ad23b04944"
+          }
+        },
         {
           "client_id": "927012189317-ht4mvk8r7bnl72m9b7icpahuqrpt5s3r.apps.googleusercontent.com",
           "client_type": 1,

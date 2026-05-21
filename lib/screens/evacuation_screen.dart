@@ -222,7 +222,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       mode: MapBoxNavigationMode.walking,
       isOptimized: true,
       units: VoiceUnits.metric,
-      simulateRoute: false, // set true to test without physically moving
+      simulateRoute: false,
       language: "en",
     );
   }

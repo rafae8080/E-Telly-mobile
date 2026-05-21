@@ -396,10 +396,10 @@ class _AlertsScreenState extends State<AlertsScreen> {
   }
 
   void _goToHome() {
-    // This completely removes the back button on Home screen
+
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (context) => const HomeScreen()),
-      (Route<dynamic> route) => false, // Removes all previous routes
+      (Route<dynamic> route) => false, 
     );
   }
 

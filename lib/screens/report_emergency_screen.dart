@@ -1466,7 +1466,7 @@ void initState() {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text(
-              'Send via P2P',
+              'Send via Bluetooth',
               style: TextStyle(
                 fontSize: 13.sp,
                 fontWeight: FontWeight.w600,
