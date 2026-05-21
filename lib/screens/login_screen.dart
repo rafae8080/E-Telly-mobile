@@ -1,13 +1,16 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:mongo_dart/mongo_dart.dart' show ObjectId;
-import 'dart:convert';
 import '../widgets/login.dart';
 import '../dbhelper/mongodb.dart';
 import '../services/auth_service.dart';
 import '../services/jwt_service.dart';
 import '../services/hive_service.dart';
+import '../services/notification_service.dart';
+import '../services/api_service.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback? onLoginSuccess;
@@ -124,6 +127,26 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _postLoginSetup() async {
+    try {
+      await NotificationService.requestPermission();
+      final fcmToken = await NotificationService.getToken();
+      if (fcmToken == null) {
+        print('[FCM] No token available — skipping registration');
+        return;
+      }
+      final platform = Platform.isIOS ? 'ios' : 'android';
+      await ApiService().authenticatedPost('/api/push/fcm-subscribe', {
+        'token': fcmToken,
+        'platform': platform,
+      });
+      await NotificationService.setupTokenRefresh(platform);
+      print('[FCM] Registration complete');
+    } catch (e) {
+      print('[FCM] Post-login setup failed: $e');
+    }
+  }
+
   void _navigateToHome() {
     if (!mounted) return;
     if (widget.onLoginSuccess != null) {
@@ -222,6 +245,8 @@ class _LoginScreenState extends State<LoginScreen> {
         await prefs.setString('userEmail', user['email'] ?? '');
         await prefs.setString('userName', user['name'] ?? '');
         await prefs.setString('authProvider', 'email');
+
+        await _postLoginSetup();
 
         if (!mounted) return;
         _showSuccessDialog(user['name'] ?? 'User');
@@ -402,7 +427,9 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       print('>>> Google user data saved with JWT token');
-      
+
+      await _postLoginSetup();
+
       if (!mounted) return;
 
       // Show success message

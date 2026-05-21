@@ -37,8 +37,22 @@ class ApiService {
   Future<http.Response> authenticatedPut(String endpoint, Map<String, dynamic> data) async {
     final token = await _authService.getToken();
     if (token == null) throw Exception('Not authenticated');
-    
+
     return await http.put(
+      Uri.parse('$baseUrl$endpoint'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(data),
+    );
+  }
+
+  Future<http.Response> authenticatedDelete(String endpoint, Map<String, dynamic> data) async {
+    final token = await _authService.getToken();
+    if (token == null) throw Exception('Not authenticated');
+
+    return await http.delete(
       Uri.parse('$baseUrl$endpoint'),
       headers: {
         'Content-Type': 'application/json',

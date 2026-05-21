@@ -8,6 +8,8 @@ import '../dbhelper/mongodb.dart';
 import '../services/auth_service.dart';
 import '../services/jwt_service.dart';
 import '../services/hive_service.dart';
+import '../services/notification_service.dart';
+import '../services/api_service.dart';
 
 // Antipolo City specific barangays
 final List<String> antipoloBarangays = [
@@ -579,6 +581,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     });
 
     try {
+      // Cancel token refresh listener and unregister from backend before JWT is cleared
+      NotificationService.cancelTokenRefresh();
+      try {
+        final fcmToken = await NotificationService.getToken();
+        if (fcmToken != null) {
+          await ApiService().authenticatedDelete(
+            '/api/push/fcm-unsubscribe',
+            {'token': fcmToken},
+          );
+        }
+      } catch (e) {
+        print('[FCM] Unsubscribe failed: $e');
+      }
+
       await _authService.logout();
       await HiveService.clearSession();
       

@@ -1,10 +1,8 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'services/offline_report_storage.dart';
 import 'services/hive_service.dart';
 import 'services/auth_service.dart';
@@ -20,6 +18,8 @@ import 'screens/sign_up_screen.dart';
 import 'screens/profile_screen.dart';
 import 'services/relay_queue_manager.dart';
 import 'services/internet_checker_service.dart';
+import 'services/notification_service.dart';
+import 'services/navigation_service.dart';
 import 'firebase_options.dart';
 
 
@@ -27,16 +27,10 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
   try {
-  
- await Firebase.initializeApp(
-  options: DefaultFirebaseOptions.currentPlatform,
-);
-    
-   
-    FirebaseMessaging messaging = FirebaseMessaging.instance;
-    await messaging.requestPermission();
-    final fcmToken = await messaging.getToken();
-    print('FCM Token: $fcmToken');
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    await NotificationService.initialize();
   } catch (e, stack) {
     print('Firebase initialization error: $e');
     print('Stack trace: $stack');
@@ -83,6 +77,7 @@ class EtellyApp extends StatelessWidget {
       useInheritedMediaQuery: true, 
       builder: (context, child) {
         return MaterialApp(
+          navigatorKey: NavigationService.navigatorKey,
           debugShowCheckedModeBanner: false,
           title: 'E-Telly',
           theme: ThemeData(
