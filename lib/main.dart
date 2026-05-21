@@ -53,13 +53,16 @@ void main() async {
   final authService = AuthService();
   final isJwtValid = await authService.isLoggedIn();
   
-  print('========== APP START ==========');
-  print('JWT Valid: $isJwtValid');
-  print('================================');
-  
   // Sync with Hive
   await HiveService.setLoggedIn(isJwtValid);
-  
+
+  // Register FCM token with backend on auto-login (JWT already valid, no manual login)
+  if (isJwtValid) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await NotificationService.postLoginSetup();
+    });
+  }
+
   runApp(EtellyApp(initialRoute: isJwtValid ? '/home' : '/welcome'));
 }
 

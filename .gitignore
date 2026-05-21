@@ -48,3 +48,9 @@ app.map
 # Environment
 .env
 .env.*
+
+# Build reports (generated artifacts)
+android/build/
+
+# Backend handoff docs (local reference only)
+MOBILE_FCM_GUIDE.md

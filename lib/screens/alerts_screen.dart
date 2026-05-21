@@ -1,9 +1,11 @@
 // lib/screens/alerts_screen.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../constants.dart';
 import '../services/alert_service.dart';
 import '../services/hive_service.dart';
-import 'home_screen.dart'; 
+import '../services/notification_service.dart';
+import 'home_screen.dart';
 
 class AlertItem {
   final String id;
@@ -83,11 +85,22 @@ class _AlertsScreenState extends State<AlertsScreen> {
   bool _isLoading = true;
   String? _error;
   bool _isOffline = false;
+  StreamSubscription<String>? _fcmSub;
 
   @override
   void initState() {
     super.initState();
     _loadAlerts();
+    // Auto-refresh when a new alert notification arrives while this screen is open
+    _fcmSub = onFcmRouteReceived.listen((route) {
+      if (route == 'alerts' && mounted) _loadAlerts();
+    });
+  }
+
+  @override
+  void dispose() {
+    _fcmSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadAlerts() async {

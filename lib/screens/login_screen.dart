@@ -1,13 +1,12 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'package:mongo_dart/mongo_dart.dart' show ObjectId;
+import 'package:firebase_auth/firebase_auth.dart';
 import '../widgets/login.dart';
 import '../dbhelper/mongodb.dart';
 import '../services/auth_service.dart';
-import '../services/jwt_service.dart';
 import '../services/hive_service.dart';
 import '../services/notification_service.dart';
 import '../services/api_service.dart';
@@ -53,56 +52,6 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
-  // ✅ KEY FIX: Safely extract MongoDB ObjectId as plain 24-char hex string
-  String _extractId(Map<String, dynamic> user) {
-    final raw = user['_id'];
-    if (raw == null) return user['id']?.toString() ?? '';
-    if (raw is ObjectId) {
-      final hex = raw.toHexString();
-      print('>>> ObjectId converted to hex: $hex');
-      return hex;
-    }
-    return raw.toString();
-  }
-
-  // ✅ Single _buildUserData used for both email and Google login
-  Map<String, dynamic> _buildUserData(
-    Map<String, dynamic> user, {
-    required String authProvider,
-    String? photoUrl,
-  }) {
-    return {
-      'id': _extractId(user),
-      'name': user['name'] ?? '',
-      'fullName': user['name'] ?? '',
-      'email': user['email'] ?? '',
-      'address': user['address'] ?? '',
-      'barangay': user['barangay'] ?? '',
-      'streetDetails': user['streetDetails'] ?? '',
-      'isSafe': true,
-      'role': user['role'] ?? 'user',
-      'authProvider': authProvider,
-      'phoneNumber': user['phoneNumber'] ?? '',
-      'region': user['region'] ?? '',
-      'province': user['province'] ?? '',
-      'city': user['city'] ?? '',
-      'postalCode': user['postalCode'] ?? '',
-      'streetAddress': user['streetAddress'] ?? user['streetDetails'] ?? '',
-      'emergencyContactName': user['emergencyContactName'] ?? '',
-      'emergencyContactPhone': user['emergencyContactPhone'] ?? '',
-      'emergencyContactRelationship': user['emergencyContactRelationship'] ?? '',
-      'profilePhoto': photoUrl ?? user['profilePhoto'] ?? user['photoUrl'] ?? '',
-      'landmark': user['landmark'] ?? '',
-    };
-  }
-
-  Future<bool> _ensureMongoConnected() async {
-    if (MongoDatabase.db == null || MongoDatabase.userCollection == null) {
-      await MongoDatabase.connect();
-    }
-    return MongoDatabase.userCollection != null;
-  }
-
   Future<void> _checkAutoLogin() async {
     if (!mounted) return;
     try {
@@ -112,7 +61,6 @@ class _LoginScreenState extends State<LoginScreen> {
         final userData = await _authService.getUserData();
         if (!mounted) return;
         if (userData != null) {
-          print('>>> Auto-login successful for: ${userData['email']}');
           _navigateToHome();
           return;
         }
@@ -128,23 +76,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _postLoginSetup() async {
-    try {
-      await NotificationService.requestPermission();
-      final fcmToken = await NotificationService.getToken();
-      if (fcmToken == null) {
-        print('[FCM] No token available — skipping registration');
-        return;
-      }
-      final platform = Platform.isIOS ? 'ios' : 'android';
-      await ApiService().authenticatedPost('/api/push/fcm-subscribe', {
-        'token': fcmToken,
-        'platform': platform,
-      });
-      await NotificationService.setupTokenRefresh(platform);
-      print('[FCM] Registration complete');
-    } catch (e) {
-      print('[FCM] Post-login setup failed: $e');
-    }
+    await NotificationService.postLoginSetup();
   }
 
   void _navigateToHome() {
@@ -194,74 +126,49 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      if (!await _ensureMongoConnected()) {
-        if (!mounted) return;
-        setState(() {
-          _generalError = 'Unable to connect to the server. Please try again.';
-          _isLoading = false;
-        });
-        return;
-      }
-
-      final user = await MongoDatabase.findUserForLogin(
-        _emailController.text.trim().toLowerCase(),
-        _passwordController.text,
+      final response = await http.post(
+        Uri.parse('${ApiService.baseUrl}/api/auth/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'email': _emailController.text.trim().toLowerCase(),
+          'password': _passwordController.text,
+        }),
       );
 
       if (!mounted) return;
 
-      if (user != null) {
-        print('>>> User found: ${user['email']}');
-        print('>>> _id type: ${user['_id']?.runtimeType}');
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body);
+        final token = body['token'] as String;
+        final userData = Map<String, dynamic>.from(body['user'] as Map);
 
-        final userData = _buildUserData(user, authProvider: 'email');
-        print('>>> userData[id]: ${userData['id']}');
-
-        print('>>> GENERATING JWT TOKEN...');
-        final jwtToken = JwtService.generateToken(userData);
-        print('>>> JWT Token generated, length: ${jwtToken.length}');
-
-        print('>>> SAVING TO SECURE STORAGE...');
-        await _authService.saveAuthData(token: jwtToken, userData: userData);
-
-        final savedToken = await _authService.getToken();
-        print('>>> Token saved: ${savedToken != null ? "YES (length: ${savedToken.length})" : "NO - FAILED"}');
-
-        if (savedToken == null) {
-          if (!mounted) return;
-          setState(() {
-            _generalError = 'Failed to save session. Please try again.';
-            _isLoading = false;
-          });
-          return;
-        }
-
+        await _authService.saveAuthData(token: token, userData: userData);
         await HiveService.setLoggedIn(true);
         await HiveService.saveUserSession(userData);
 
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('userData', jsonEncode(userData));
         await prefs.setBool('isLoggedIn', true);
-        await prefs.setString('userEmail', user['email'] ?? '');
-        await prefs.setString('userName', user['name'] ?? '');
+        await prefs.setString('userEmail', userData['email'] ?? '');
+        await prefs.setString('userName', userData['name'] ?? '');
         await prefs.setString('authProvider', 'email');
 
         await _postLoginSetup();
 
         if (!mounted) return;
-        _showSuccessDialog(user['name'] ?? 'User');
+        _showSuccessDialog(userData['name'] ?? 'User');
       } else {
+        final body = jsonDecode(response.body);
         setState(() {
-          _generalError = 'Invalid email or password. Please try again.';
+          _generalError = body['error'] ?? 'Invalid email or password. Please try again.';
           _isLoading = false;
         });
       }
-    } catch (error, stack) {
+    } catch (error) {
       print('>>> Login error: $error');
-      print('>>> Stack trace: $stack');
       if (!mounted) return;
       setState(() {
-        _generalError = 'An error occurred: ${error.toString().split('\n')[0]}';
+        _generalError = 'An error occurred. Check your connection and try again.';
         _isLoading = false;
       });
     }
@@ -331,84 +238,40 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      print('>>> Google Sign-In successful: ${googleUser.email}');
-      print('>>> Google User ID: ${googleUser.id}');
-      print('>>> Google Display Name: ${googleUser.displayName}');
-
-      // Ensure MongoDB connection
-      if (!await _ensureMongoConnected()) {
+      // Get Firebase ID token and exchange it for a backend-signed JWT
+      final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
+      if (idToken == null) {
         if (!mounted) return;
         setState(() {
-          _generalError = 'Unable to connect to the server.';
+          _generalError = 'Failed to get authentication token. Please try again.';
           _isLoading = false;
         });
         return;
       }
 
-      // Check if user exists in database
-      final existingUser = await MongoDatabase.findUserByEmail(
-        googleUser.email.toLowerCase(),
+      final authResponse = await http.post(
+        Uri.parse('${ApiService.baseUrl}/api/auth/google'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'idToken': idToken}),
       );
 
-      Map<String, dynamic> userData;
+      if (!mounted) return;
 
-      if (existingUser != null) {
-        // Existing user - update last login
-        print('>>> Existing user found, updating login info');
-        userData = _buildUserData(
-          existingUser,
-          authProvider: 'google',
-          photoUrl: googleUser.photoUrl,
-        );
-        await MongoDatabase.updateUser(googleUser.email.toLowerCase(), {
-          'lastLogin': DateTime.now().toIso8601String(),
-          'updatedAt': DateTime.now().toIso8601String(),
+      if (authResponse.statusCode != 200) {
+        final errBody = jsonDecode(authResponse.body);
+        setState(() {
+          _generalError = errBody['error'] ?? 'Google sign-in failed. Please try again.';
+          _isLoading = false;
         });
-      } else {
-        // New user - create account
-        print('>>> New user, creating account');
-        final newUser = {
-          'name': googleUser.displayName ?? googleUser.email.split('@')[0],
-          'email': googleUser.email.toLowerCase(),
-          'password': 'google_auth_${DateTime.now().millisecondsSinceEpoch}',
-          'isActive': true,
-          'role': 'user',
-          'authProvider': 'google',
-          'createdAt': DateTime.now().toIso8601String(),
-          'updatedAt': DateTime.now().toIso8601String(),
-          'lastLogin': DateTime.now().toIso8601String(),
-          'emailVerified': true,
-          'phoneNumber': '',
-          'region': '',
-          'province': '',
-          'city': '',
-          'barangay': '',
-          'postalCode': '',
-          'streetDetails': '',
-          'address': '',
-          'emergencyContactName': '',
-          'emergencyContactPhone': '',
-          'emergencyContactRelationship': '',
-          'profilePhoto': googleUser.photoUrl ?? '',
-          'landmark': '',
-        };
-        await MongoDatabase.insertUser(newUser);
-        
-        // Get the created user with ObjectId
-        final createdUser = await MongoDatabase.findUserByEmail(googleUser.email.toLowerCase());
-        userData = _buildUserData(
-          createdUser ?? newUser,
-          authProvider: 'google',
-          photoUrl: googleUser.photoUrl,
-        );
+        return;
       }
 
-      print('>>> GENERATING JWT TOKEN FOR GOOGLE USER...');
-      final jwtToken = JwtService.generateToken(userData);
-      print('>>> JWT Token generated, length: ${jwtToken.length}');
+      final authBody = jsonDecode(authResponse.body);
+      final token = authBody['token'] as String;
+      final userData = Map<String, dynamic>.from(authBody['user'] as Map);
 
       // Save to secure storage using AuthService
-      await _authService.saveAuthData(token: jwtToken, userData: userData);
+      await _authService.saveAuthData(token: token, userData: userData);
       
       // Save to Hive for backup
       await HiveService.setLoggedIn(true);
@@ -425,8 +288,6 @@ class _LoginScreenState extends State<LoginScreen> {
       if (googleUser.photoUrl != null) {
         await prefs.setString('profile_image', googleUser.photoUrl!);
       }
-
-      print('>>> Google user data saved with JWT token');
 
       await _postLoginSetup();
 

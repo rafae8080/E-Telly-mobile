@@ -4,11 +4,18 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'navigation_service.dart';
 import 'api_service.dart';
+import 'auth_service.dart';
+import 'hive_service.dart';
+
+// Broadcast stream — any screen can listen for incoming FCM route events
+// Used to trigger data refreshes when a notification arrives while the app is open
+final _incomingRouteController = StreamController<String>.broadcast();
+Stream<String> get onFcmRouteReceived => _incomingRouteController.stream;
 
 // Must be a top-level function — Firebase runs background messages in a separate isolate
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  print('[FCM Background] Received: ${message.notification?.title}');
+  // System automatically shows the notification banner from the FCM payload
 }
 
 class NotificationService {
@@ -59,20 +66,48 @@ class NotificationService {
     }
   }
 
+  // Call after login AND after auto-login — registers the FCM token with the backend
+  static Future<void> postLoginSetup() async {
+    try {
+      await requestPermission();
+      final fcmToken = await getToken();
+      if (fcmToken == null) {
+        print('[FCM] No token available — skipping registration');
+        return;
+      }
+      final platform = Platform.isIOS ? 'ios' : 'android';
+      final response = await ApiService().authenticatedPost('/api/push/fcm-subscribe', {
+        'token': fcmToken,
+        'platform': platform,
+      });
+      if (response.statusCode == 401) {
+        print('[FCM] Stale JWT detected — clearing auth and redirecting to login');
+        await AuthService().logout();
+        await HiveService.setLoggedIn(false);
+        NavigationService.navigatorKey.currentState
+            ?.pushNamedAndRemoveUntil('/login', (route) => false);
+        return;
+      }
+      if (response.statusCode != 200) {
+        print('[FCM] Registration error body: ${response.body}');
+      }
+      await setupTokenRefresh(platform);
+    } catch (e) {
+      print('[FCM] postLoginSetup failed: $e');
+    }
+  }
+
   static Future<void> requestPermission() async {
-    final settings = await _messaging.requestPermission(
+    await _messaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
       provisional: false,
     );
-    print('[FCM] Permission status: ${settings.authorizationStatus}');
   }
 
   static Future<String?> getToken() async {
-    final token = await _messaging.getToken();
-    print('[FCM] Device token: $token');
-    return token;
+    return await _messaging.getToken();
   }
 
   // Call after login — listens for token rotation and re-registers automatically
@@ -95,7 +130,6 @@ class NotificationService {
         'token': token,
         'platform': platform,
       });
-      print('[FCM] Token re-registered after refresh');
     } catch (e) {
       print('[FCM] Token refresh registration failed: $e');
     }
@@ -103,6 +137,7 @@ class NotificationService {
 
   static void _handleForegroundMessage(RemoteMessage message) {
     final notification = message.notification;
+    _incomingRouteController.add(message.data['route'] ?? 'home');
     if (notification == null) return;
 
     _localNotifications.show(
