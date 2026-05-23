@@ -41,6 +41,8 @@ dependencies:
   nearby_connections: ^4.3.0
   device_info_plus: ^10.0.0
   flutter_mapbox_navigation: ^0.2.2
+  network_info_plus: ^4.0.0
+  uuid: ^4.0.0
 
  
 

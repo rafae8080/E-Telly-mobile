@@ -7,7 +7,16 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../dbhelper/mongodb.dart';
+import 'auth_service.dart';
+import 'endpoint_resolver.dart';
 import 'relay_queue_manager.dart';
+
+/// Thrown when the server explicitly rejects a report (HTTP 400).
+/// The report should not be retried — it has a permanent data problem.
+class _PermanentUploadFailure implements Exception {
+  final String message;
+  _PermanentUploadFailure(this.message);
+}
 
 /// Callback fired after every upload attempt.
 /// [succeeded] — number of reports successfully uploaded this cycle.
@@ -16,16 +25,7 @@ typedef UploadCycleCallback = void Function(
     {required int succeeded, required int failed});
 
 /// Monitors network connectivity and automatically flushes the relay queue
-/// whenever internet access is restored.
-///
-/// Lifecycle:
-///   InternetCheckerService.instance.start();   // typically in main() or home screen
-///   InternetCheckerService.instance.dispose();  // on app exit
-///
-/// The service uses two complementary mechanisms:
-///   1. connectivity_plus stream  — fires quickly on Wi-Fi / mobile toggle.
-///   2. Periodic timer           — catches cases where the stream doesn't fire
-///      (e.g. the device had a network interface but no actual internet).
+/// whenever internet access (or a reachable local barangay server) is detected.
 class InternetCheckerService {
   // ── Singleton ──────────────────────────────────────────────────────────────
 
@@ -34,17 +34,8 @@ class InternetCheckerService {
 
   // ── Config ─────────────────────────────────────────────────────────────────
 
-  /// How often the periodic check runs even when connectivity hasn't changed.
   static const Duration _pollInterval = Duration(minutes: 2);
-
-  /// Timeout for a single HTTP upload attempt.
   static const Duration _uploadTimeout = Duration(seconds: 20);
-
-  /// Base URL of your Express backend (matches the one in report_emergency_screen).
-  static const String _backendBase = 'https://e-telly-ca75b10e9536.herokuapp.com';
-
-  /// Maximum consecutive upload failures before the service backs off for one
-  /// poll cycle.
   static const int _maxConsecutiveErrors = 3;
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -52,41 +43,33 @@ class InternetCheckerService {
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   Timer? _pollTimer;
   bool _isRunning = false;
-  bool _isFlushing = false; // guard against concurrent flushes
+  bool _isFlushing = false;
   int _consecutiveErrors = 0;
 
-  /// Set this callback to be notified after each upload cycle completes.
   UploadCycleCallback? onCycleComplete;
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
-  /// Starts listening for connectivity changes and polls periodically.
-  /// Safe to call multiple times – re-entrant calls are ignored.
   void start({UploadCycleCallback? onCycleComplete}) {
     if (_isRunning) return;
     _isRunning = true;
     this.onCycleComplete = onCycleComplete;
 
-    // 1. React to connectivity changes immediately
     _connectivitySub = Connectivity()
         .onConnectivityChanged
         .listen(_onConnectivityChanged);
 
-    // 2. Poll periodically as a safety net
     _pollTimer = Timer.periodic(_pollInterval, (_) async {
-      if (await _hasRealInternet()) {
+      if (await _hasConnectivity()) {
         await _flushQueue();
       }
     });
 
-    // 3. Run once right now in case we already have internet
     _initialCheck();
 
     debugPrint('[InternetChecker] Started.');
   }
 
-  /// Stops all listeners and timers. Call this in your widget's dispose or
-  /// when the user logs out.
   void dispose() {
     _connectivitySub?.cancel();
     _pollTimer?.cancel();
@@ -94,24 +77,20 @@ class InternetCheckerService {
     debugPrint('[InternetChecker] Disposed.');
   }
 
-  /// Force an immediate flush attempt (e.g. after the user taps a "Retry" button).
   Future<void> forceFlush() async {
-    if (await _hasRealInternet()) {
+    if (await _hasConnectivity()) {
       await _flushQueue();
     }
   }
 
-  /// Whether there is currently at least one pending report waiting to upload.
   bool get hasPendingReports => RelayQueueManager.hasPending;
-
-  /// Current count of reports waiting to be uploaded.
   int get pendingCount => RelayQueueManager.pendingCount;
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
   Future<void> _initialCheck() async {
-    await Future.delayed(const Duration(seconds: 2)); // let app settle
-    if (await _hasRealInternet()) {
+    await Future.delayed(const Duration(seconds: 2));
+    if (await _hasConnectivity()) {
       await _flushQueue();
     }
   }
@@ -123,20 +102,28 @@ class InternetCheckerService {
       return;
     }
 
-    // The interface is up – but verify there's actual internet
-    debugPrint('[InternetChecker] Network change detected. Verifying internet…');
-    await Future.delayed(const Duration(seconds: 1)); // brief settle delay
+    debugPrint('[InternetChecker] Network change detected. Checking connectivity…');
+    await Future.delayed(const Duration(seconds: 1));
 
-    if (await _hasRealInternet()) {
-      debugPrint('[InternetChecker] Internet confirmed. Flushing queue…');
+    if (await _hasConnectivity()) {
+      debugPrint('[InternetChecker] Connectivity confirmed. Flushing queue…');
       await _flushQueue();
     } else {
-      debugPrint('[InternetChecker] Interface up but no real internet.');
+      debugPrint('[InternetChecker] Interface up but no reachable server.');
     }
   }
 
-  /// Sends a lightweight HEAD request to verify actual internet connectivity,
-  /// avoiding false positives on captive portals or aeroplane-mode edges.
+  /// True when the device can reach either the internet or the local barangay server.
+  Future<bool> _hasConnectivity() async {
+    if (await _hasRealInternet()) return true;
+    // No internet — check if the barangay local server is reachable
+    final url = await EndpointResolver.getBaseUrl();
+    return _isLocalServerUrl(url);
+  }
+
+  /// True if [url] is a local barangay server (not cloud, not empty).
+  bool _isLocalServerUrl(String url) => url.isNotEmpty && url != cloudBaseUrl;
+
   Future<bool> _hasRealInternet() async {
     try {
       final result = await InternetAddress.lookup('google.com')
@@ -147,9 +134,8 @@ class InternetCheckerService {
     }
   }
 
-  /// Iterates over all pending relay entries and tries to upload each one.
   Future<void> _flushQueue() async {
-    if (_isFlushing) return; // already in progress
+    if (_isFlushing) return;
     _isFlushing = true;
 
     final pending = RelayQueueManager.getPending();
@@ -164,10 +150,8 @@ class InternetCheckerService {
     int failed = 0;
 
     for (final entry in pending) {
-      // Back-off if we've had too many consecutive errors
       if (_consecutiveErrors >= _maxConsecutiveErrors) {
-        debugPrint(
-            '[InternetChecker] Too many errors – skipping rest of cycle.');
+        debugPrint('[InternetChecker] Too many errors – skipping rest of cycle.');
         break;
       }
 
@@ -183,7 +167,6 @@ class InternetCheckerService {
       }
     }
 
-    // Housekeeping: remove stale uploaded entries
     await RelayQueueManager.pruneUploaded();
 
     debugPrint(
@@ -195,88 +178,164 @@ class InternetCheckerService {
   }
 
   /// Attempts to upload a single relay entry.
-  /// Tries MongoDB first, then falls back to the HTTP backend.
-  /// Returns `true` on success.
+  /// Routes to the local barangay server when on ETelly WiFi,
+  /// otherwise tries MongoDB Atlas then the HTTP backend.
   Future<bool> _uploadEntry(RelayEntry entry) async {
-  try {
-    // Only connect if not already connected
-    if (MongoDatabase.db == null || !MongoDatabase.db!.isConnected) {
-      await MongoDatabase.connect();
-    }
-    await MongoDatabase.saveEmergencyReport(entry.report)
-        .timeout(_uploadTimeout);
-    _notifyBackend(entry.report);
-    return true;
-  } catch (mongoErr) {
-    debugPrint('[InternetChecker] MongoDB failed for ${entry.reportId}: $mongoErr');
-  }
+    final baseUrl = await EndpointResolver.getBaseUrl();
 
-    // ── Step 2: HTTP backend fallback ────────────────────────────────────────
+    if (baseUrl.isEmpty) {
+      debugPrint('[InternetChecker] No connectivity for ${entry.reportId}.');
+      return false;
+    }
+
+    // Build a copy of the report with the correct source tag
+    final report = Map<String, dynamic>.from(entry.report);
+    if (report['source'] != 'mesh_relay') {
+      report['source'] = _isLocalServerUrl(baseUrl) ? 'direct_wifi' : 'online';
+    }
+    // Ensure offlineSubmittedAt is present (set at creation time, but guard here)
+    report.putIfAbsent(
+        'offlineSubmittedAt', () => DateTime.now().toIso8601String());
+
+    // ── Path A: Local barangay server ────────────────────────────────────────
+    if (_isLocalServerUrl(baseUrl)) {
+      try {
+        final ok = await _postToLocalServer(baseUrl, report);
+        if (!ok) {
+          await RelayQueueManager.markAsFailed(
+            entry.reportId,
+            'Local server upload failed at ${DateTime.now().toIso8601String()}',
+          );
+        }
+        return ok;
+      } on _PermanentUploadFailure catch (e) {
+        await RelayQueueManager.markAsFailed(entry.reportId, e.message,
+            permanent: true);
+        debugPrint('[InternetChecker] ❌ Permanent failure ${entry.reportId}: ${e.message}');
+        return false;
+      }
+    }
+
+    // ── Path B: Cloud (MongoDB Atlas → HTTP backend) ─────────────────────────
     try {
-      final success = await _postToBackend(entry.report);
-      if (success) return true;
+      if (MongoDatabase.db == null || !MongoDatabase.db!.isConnected) {
+        await MongoDatabase.connect();
+      }
+      await MongoDatabase.saveEmergencyReport(report).timeout(_uploadTimeout);
+      unawaited(_notifyBackend(report));
+      return true;
+    } catch (mongoErr) {
+      debugPrint(
+          '[InternetChecker] MongoDB failed for ${entry.reportId}: $mongoErr');
+    }
+
+    try {
+      final success = await _postToBackend(baseUrl, report);
+      if (success) {
+        unawaited(_notifyBackend(report));
+        return true;
+      }
+    } on _PermanentUploadFailure catch (e) {
+      await RelayQueueManager.markAsFailed(entry.reportId, e.message,
+          permanent: true);
+      debugPrint('[InternetChecker] ❌ Permanent failure ${entry.reportId}: ${e.message}');
+      return false;
     } catch (httpErr) {
-    debugPrint('[InternetChecker] HTTP fallback failed for ${entry.reportId}: $httpErr');
+      debugPrint(
+          '[InternetChecker] HTTP fallback failed for ${entry.reportId}: $httpErr');
     }
 
     await RelayQueueManager.markAsFailed(
-    entry.reportId,
-    'Upload failed at ${DateTime.now().toIso8601String()}',
-  );
+      entry.reportId,
+      'Upload failed at ${DateTime.now().toIso8601String()}',
+    );
     return false;
-}
+  }
 
-  /// POSTs the report to the Express backend's save endpoint.
-  Future<bool> _postToBackend(Map<String, dynamic> report) async {
+  /// POSTs to the local barangay Express server's report creation endpoint.
+  /// [baseUrl] is the resolved local server URL (e.g. http://192.168.137.1:5000).
+  Future<bool> _postToLocalServer(String baseUrl, Map<String, dynamic> report) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/api/reports/create'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(report),
+          )
+          .timeout(_uploadTimeout);
+      debugPrint(
+          '[InternetChecker] Local server response: ${response.statusCode}');
+      if (response.statusCode == 400) {
+        throw _PermanentUploadFailure('400 Bad Request: ${response.body}');
+      }
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } on _PermanentUploadFailure {
+      rethrow;
+    } catch (e) {
+      debugPrint('[InternetChecker] Local server POST failed: $e');
+      return false;
+    }
+  }
+
+  /// POSTs the report via HTTP.
+  /// Uses [baseUrl] from [EndpointResolver.getBaseUrl()] — never hardcodes a URL.
+  /// Chooses the correct endpoint based on whether [baseUrl] is local or cloud.
+  Future<bool> _postToBackend(String baseUrl, Map<String, dynamic> report) async {
+    final endpoint = _isLocalServerUrl(baseUrl)
+        ? '/api/reports/create'
+        : '/api/save-emergency-report';
     final response = await http
         .post(
-          Uri.parse('$_backendBase/api/save-emergency-report'),
+          Uri.parse('$baseUrl$endpoint'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode(report),
         )
         .timeout(_uploadTimeout);
 
+    if (response.statusCode == 400) {
+      throw _PermanentUploadFailure('400 Bad Request: ${response.body}');
+    }
     return response.statusCode == 200 || response.statusCode == 201;
   }
 
   Future<bool> forceFlushIfOnline() async {
-    if (await _hasRealInternet()) {
+    if (await _hasConnectivity()) {
       await _flushQueue();
       return true;
     }
     return false;
   }
 
-  /// Fire-and-forget notification to the backend's notify endpoint.
-  /// Matches the existing call in report_emergency_screen.dart.
-  void _notifyBackend(Map<String, dynamic> report) {
-    http
-        .post(
-          Uri.parse('$_backendBase/api/notify-emergency'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'reportId': report['id'],
-            'emergencyType': report['emergencyType'],
-            'severity': report['severity'],
-            'location': report['location']?['exactAddress'],
-            'detailedAddress': report['location']?['detailedAddress'],
-            'barangay': report['location']?['barangay'],
-            'city': report['location']?['city'],
-            'timestamp': report['timestamp'],
-            'userName': report['userData']?['fullName'],
-            'phoneNumber': report['userData']?['phoneNumber'],
-            'description': report['description'],
-            'relayedReport': true,
-            'relayHops': report['relayHops'] ?? 0,
-          }),
-        )
-        .timeout(_uploadTimeout)
-        .then((res) {
-          debugPrint(
-              '[InternetChecker] Backend notified – status ${res.statusCode}');
-        })
-        .catchError((e) {
-          debugPrint('[InternetChecker] Backend notify failed: $e');
-        });
+  Future<void> _notifyBackend(Map<String, dynamic> report) async {
+    try {
+      final token = await AuthService().getToken();
+      final headers = {'Content-Type': 'application/json'};
+      if (token != null) headers['Authorization'] = 'Bearer $token';
+
+      final res = await http
+          .post(
+            Uri.parse('$cloudBaseUrl/api/notify-emergency'),
+            headers: headers,
+            body: jsonEncode({
+              'reportId': report['id'],
+              'emergencyType': report['emergencyType'],
+              'severity': report['severity'],
+              'location': report['location']?['exactAddress'],
+              'detailedAddress': report['location']?['detailedAddress'],
+              'barangay': report['location']?['barangay'],
+              'city': report['location']?['city'],
+              'timestamp': report['timestamp'],
+              'userName': report['userData']?['fullName'],
+              'phoneNumber': report['userData']?['phoneNumber'],
+              'description': report['description'],
+              'relayedReport': true,
+              'relayHops': report['relayHops'] ?? 0,
+            }),
+          )
+          .timeout(_uploadTimeout);
+      debugPrint('[InternetChecker] Backend notified – status ${res.statusCode}');
+    } catch (e) {
+      debugPrint('[InternetChecker] Backend notify failed: $e');
+    }
   }
 }

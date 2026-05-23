@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:uuid/uuid.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
@@ -10,6 +11,8 @@ import 'dart:convert';
 import 'dart:io';
 import '../widgets/custom_font.dart';
 import '../dbhelper/mongodb.dart';
+import '../services/auth_service.dart';
+import '../services/endpoint_resolver.dart';
 import '../services/relay_queue_manager.dart';
 import '../services/internet_checker_service.dart';
 import '../screens/p2p_relay_screen.dart';
@@ -898,8 +901,10 @@ void initState() {
         }
       }
       
+      final now = DateTime.now();
       final report = {
-        'id': DateTime.now().millisecondsSinceEpoch.toString(),
+        'id': now.millisecondsSinceEpoch.toString(),
+        'reportId': const Uuid().v4(),
         'emergencyType': _emergencyType,
         'severity': _severity,
         'description': _descriptionController.text.trim(),
@@ -926,9 +931,14 @@ void initState() {
             'longitude': _currentPosition.isNotEmpty ? _currentPosition[1] : null,
           }
         },
-        'timestamp': DateTime.now().toIso8601String(),
-        'date': DateTime.now().toString(),
+        'timestamp': now.toIso8601String(),
+        'date': now.toString(),
         'status': 'pending',
+        // source and offlineSubmittedAt are used by the offline/local-server system.
+        // source is overridden at upload time (direct_wifi / online); mesh_relay is
+        // set by p2p_relay_service when the report is received from another device.
+        'source': 'online',
+        'offlineSubmittedAt': now.toIso8601String(),
       };
       
       await _saveToLocalStorage(report);
@@ -947,7 +957,14 @@ void initState() {
       //_saveToMongoDBInBackground(report);
       final isOnline = await InternetCheckerService.instance.forceFlushIfOnline();
       if (isOnline) {
-        _notifyBackendInBackground(report);
+        // Only notify the cloud backend when we actually have internet.
+        // On local ETelly WiFi the resolved URL is a LAN address — no internet
+        // is available so the Heroku notify call would fail. The local server
+        // handles its own notifications in that case.
+        final resolvedUrl = await EndpointResolver.getBaseUrl();
+        if (resolvedUrl == cloudBaseUrl) {
+          _notifyBackendInBackground(report);
+        }
       }
       _syncReportsToLocalStorage();
       
@@ -998,29 +1015,29 @@ void initState() {
   Future<void> _notifyBackendInBackground(Map<String, dynamic> report) async {
     try {
       await Future.delayed(const Duration(seconds: 1));
+      final token = await AuthService().getToken();
+      final headers = {'Content-Type': 'application/json'};
+      if (token != null) headers['Authorization'] = 'Bearer $token';
+
       final response = await http.post(
         Uri.parse('https://e-telly-ca75b10e9536.herokuapp.com/api/notify-emergency'),
-        headers: {'Content-Type': 'application/json'},
+        headers: headers,
         body: jsonEncode({
           'reportId': report['id'],
           'emergencyType': report['emergencyType'],
           'severity': report['severity'],
-          'location': report['location']['exactAddress'],
-          'detailedAddress': report['location']['detailedAddress'],
-          'barangay': report['location']['barangay'],
-          'city': report['location']['city'],
+          'location': report['location']?['exactAddress'],
+          'detailedAddress': report['location']?['detailedAddress'],
+          'barangay': report['location']?['barangay'],
+          'city': report['location']?['city'],
           'timestamp': report['timestamp'],
-          'userName': report['userData']['fullName'],
-          'phoneNumber': report['userData']['phoneNumber'],
+          'userName': report['userData']?['fullName'],
+          'phoneNumber': report['userData']?['phoneNumber'],
           'description': report['description'],
         }),
       );
-      
-      if (response.statusCode == 200) {
-        debugPrint('Backend notified successfully');
-      } else {
-        debugPrint('Failed to notify backend: ${response.statusCode}');
-      }
+
+      debugPrint('Backend notified: ${response.statusCode}');
     } catch (e) {
       debugPrint('Error notifying backend: $e');
     }

@@ -270,8 +270,15 @@ class P2PRelayService {
           'deviceName': _peers[endpointId]?.endpointName ?? 'Unknown',
           'timestamp': DateTime.now().toIso8601String(),
         };
+
+        // Tag the report as mesh-relayed and preserve the original submission time
+        final relayedReport = Map<String, dynamic>.from(entry.report);
+        relayedReport['source'] = 'mesh_relay';
+        relayedReport.putIfAbsent(
+            'offlineSubmittedAt', () => DateTime.now().toIso8601String());
+
         await RelayQueueManager.enqueueRelayed(
-          report: entry.report,
+          report: relayedReport,
           peerInfo: peerInfo,
         );
         InternetCheckerService.instance.forceFlush();

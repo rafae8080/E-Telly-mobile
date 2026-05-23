@@ -210,7 +210,10 @@ class RelayQueueManager {
   }
 
   /// Records a failed upload attempt; bumps [uploadAttempts].
-  static Future<void> markAsFailed(String reportId, String error) async {
+  /// Pass [permanent] = true for unrecoverable failures (e.g. HTTP 400) — sets
+  /// [uploadAttempts] above the retry threshold so the entry is never retried.
+  static Future<void> markAsFailed(String reportId, String error,
+      {bool permanent = false}) async {
     final key = _findKeyById(reportId);
     if (key == null) return;
 
@@ -219,7 +222,7 @@ class RelayQueueManager {
 
     final entry = RelayEntry.fromMap(raw);
     entry.status = RelayStatus.failed;
-    entry.uploadAttempts++;
+    entry.uploadAttempts = permanent ? 999 : entry.uploadAttempts + 1;
     entry.lastError = error;
     entry.updatedAt = DateTime.now();
 
