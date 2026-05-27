@@ -7,7 +7,6 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../dbhelper/mongodb.dart';
-import 'auth_service.dart';
 import 'endpoint_resolver.dart';
 import 'relay_queue_manager.dart';
 
@@ -193,6 +192,9 @@ class InternetCheckerService {
     if (report['source'] != 'mesh_relay') {
       report['source'] = _isLocalServerUrl(baseUrl) ? 'direct_wifi' : 'online';
     }
+    // Strip any pre-fix local file paths — only keep already-uploaded URLs
+    final rawImages = List<String>.from(report['images'] ?? []);
+    report['images'] = rawImages.where((s) => s.startsWith('http')).toList();
     // Ensure offlineSubmittedAt is present (set at creation time, but guard here)
     report.putIfAbsent(
         'offlineSubmittedAt', () => DateTime.now().toIso8601String());
@@ -222,7 +224,6 @@ class InternetCheckerService {
         await MongoDatabase.connect();
       }
       await MongoDatabase.saveEmergencyReport(report).timeout(_uploadTimeout);
-      unawaited(_notifyBackend(report));
       return true;
     } catch (mongoErr) {
       debugPrint(
@@ -232,7 +233,6 @@ class InternetCheckerService {
     try {
       final success = await _postToBackend(baseUrl, report);
       if (success) {
-        unawaited(_notifyBackend(report));
         return true;
       }
     } on _PermanentUploadFailure catch (e) {
@@ -304,38 +304,5 @@ class InternetCheckerService {
       return true;
     }
     return false;
-  }
-
-  Future<void> _notifyBackend(Map<String, dynamic> report) async {
-    try {
-      final token = await AuthService().getToken();
-      final headers = {'Content-Type': 'application/json'};
-      if (token != null) headers['Authorization'] = 'Bearer $token';
-
-      final res = await http
-          .post(
-            Uri.parse('$cloudBaseUrl/api/notify-emergency'),
-            headers: headers,
-            body: jsonEncode({
-              'reportId': report['id'],
-              'emergencyType': report['emergencyType'],
-              'severity': report['severity'],
-              'location': report['location']?['exactAddress'],
-              'detailedAddress': report['location']?['detailedAddress'],
-              'barangay': report['location']?['barangay'],
-              'city': report['location']?['city'],
-              'timestamp': report['timestamp'],
-              'userName': report['userData']?['fullName'],
-              'phoneNumber': report['userData']?['phoneNumber'],
-              'description': report['description'],
-              'relayedReport': true,
-              'relayHops': report['relayHops'] ?? 0,
-            }),
-          )
-          .timeout(_uploadTimeout);
-      debugPrint('[InternetChecker] Backend notified – status ${res.statusCode}');
-    } catch (e) {
-      debugPrint('[InternetChecker] Backend notify failed: $e');
-    }
   }
 }

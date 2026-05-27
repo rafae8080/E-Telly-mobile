@@ -7,11 +7,11 @@ import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'dart:convert';
 import 'dart:io';
 import '../widgets/custom_font.dart';
 import '../dbhelper/mongodb.dart';
-import '../services/auth_service.dart';
 import '../services/endpoint_resolver.dart';
 import '../services/relay_queue_manager.dart';
 import '../services/internet_checker_service.dart';
@@ -174,7 +174,7 @@ class _ReportEmergencyScreenState extends State<ReportEmergencyScreen> {
   bool _isSubmitting = false;
   UserData _userData = const UserData();
   bool _loading = true;
-  final List<String> _images = [];
+  final List<XFile> _images = [];
   bool _showAdditionalInfo = false;
   final ImagePicker _picker = ImagePicker();
   final TextEditingController _descriptionController = TextEditingController();
@@ -839,7 +839,7 @@ void initState() {
       imageQuality: 50,
     );
     if (image != null && _images.length < 5) {
-      setState(() => _images.add(image.path));
+      setState(() => _images.add(image));
     } else if (_images.length >= 5) {
       _showAlert('Limit Reached', 'You can only upload up to 5 images');
     }
@@ -851,11 +851,53 @@ void initState() {
       imageQuality: 50,
     );
     if (image != null && _images.length < 5) {
-      setState(() => _images.add(image.path));
+      setState(() => _images.add(image));
     }
   }
 
   void _removeImage(int index) => setState(() => _images.removeAt(index));
+
+  Future<List<String>> _uploadImages({int retries = 2}) async {
+    debugPrint('_uploadImages called, image count: ${_images.length}');
+    if (_images.isEmpty) return [];
+    for (int attempt = 0; attempt <= retries; attempt++) {
+      try {
+        final baseUrl = await EndpointResolver.getBaseUrl();
+        if (baseUrl.isEmpty) {
+          debugPrint('_uploadImages: baseUrl is empty, skipping upload');
+          return [];
+        }
+        final uploadUrl = '$baseUrl/api/reports/upload-images';
+        debugPrint('Upload URL: $uploadUrl');
+        final uri = Uri.parse(uploadUrl);
+        final request = http.MultipartRequest('POST', uri);
+        for (final xfile in _images) {
+          debugPrint('MIME type: ${xfile.mimeType}');
+          final bytes = await xfile.readAsBytes();
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'images',
+              bytes,
+              filename: xfile.name,
+              contentType: MediaType.parse(xfile.mimeType ?? 'image/jpeg'),
+            ),
+          );
+        }
+        final streamed =
+            await request.send().timeout(const Duration(seconds: 60));
+        final response = await http.Response.fromStream(streamed);
+        debugPrint('Upload response status: ${response.statusCode}');
+        debugPrint('Upload response body: ${response.body}');
+        if (response.statusCode != 200) break;
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        return List<String>.from(body['urls'] ?? []);
+      } catch (e) {
+        debugPrint('_uploadImages attempt $attempt error: $e');
+        if (attempt == retries) break;
+      }
+    }
+    return [];
+  }
 
   void _showAlert(String title, String message) {
     showDialog(
@@ -901,6 +943,17 @@ void initState() {
         }
       }
       
+      final imageUrls = await _uploadImages(retries: 2);
+      if (_images.isNotEmpty && imageUrls.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                "Photos couldn't be attached — report will be submitted without them."),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+
       final now = DateTime.now();
       final report = {
         'id': now.millisecondsSinceEpoch.toString(),
@@ -908,7 +961,7 @@ void initState() {
         'emergencyType': _emergencyType,
         'severity': _severity,
         'description': _descriptionController.text.trim(),
-        'images': List<String>.from(_images),
+        'images': imageUrls,
         'userData': {
           'fullName': _userData.fullName ?? 'Anonymous',
           'email': _userData.email ?? 'no-email@example.com',
@@ -955,17 +1008,7 @@ void initState() {
       if (mounted) setState(() => _isSubmitting = false);
       
       //_saveToMongoDBInBackground(report);
-      final isOnline = await InternetCheckerService.instance.forceFlushIfOnline();
-      if (isOnline) {
-        // Only notify the cloud backend when we actually have internet.
-        // On local ETelly WiFi the resolved URL is a LAN address — no internet
-        // is available so the Heroku notify call would fail. The local server
-        // handles its own notifications in that case.
-        final resolvedUrl = await EndpointResolver.getBaseUrl();
-        if (resolvedUrl == cloudBaseUrl) {
-          _notifyBackendInBackground(report);
-        }
-      }
+      await InternetCheckerService.instance.forceFlushIfOnline();
       _syncReportsToLocalStorage();
       
     } catch (e) {
@@ -1012,36 +1055,6 @@ void initState() {
     }
   }
   
-  Future<void> _notifyBackendInBackground(Map<String, dynamic> report) async {
-    try {
-      await Future.delayed(const Duration(seconds: 1));
-      final token = await AuthService().getToken();
-      final headers = {'Content-Type': 'application/json'};
-      if (token != null) headers['Authorization'] = 'Bearer $token';
-
-      final response = await http.post(
-        Uri.parse('https://e-telly-ca75b10e9536.herokuapp.com/api/notify-emergency'),
-        headers: headers,
-        body: jsonEncode({
-          'reportId': report['id'],
-          'emergencyType': report['emergencyType'],
-          'severity': report['severity'],
-          'location': report['location']?['exactAddress'],
-          'detailedAddress': report['location']?['detailedAddress'],
-          'barangay': report['location']?['barangay'],
-          'city': report['location']?['city'],
-          'timestamp': report['timestamp'],
-          'userName': report['userData']?['fullName'],
-          'phoneNumber': report['userData']?['phoneNumber'],
-          'description': report['description'],
-        }),
-      );
-
-      debugPrint('Backend notified: ${response.statusCode}');
-    } catch (e) {
-      debugPrint('Error notifying backend: $e');
-    }
-  }
 
   void _showSuccessDialog() {
     showDialog(
@@ -1928,7 +1941,7 @@ void initState() {
                   ],
                 ),
                 SizedBox(height: 10.h),
-                ImagePreviewList(images: _images, onRemove: _removeImage),
+                ImagePreviewList(images: _images.map((x) => x.path).toList(), onRemove: _removeImage),
               ],
               SizedBox(height: 20.h),
               const Text(
