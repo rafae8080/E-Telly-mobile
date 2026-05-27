@@ -311,33 +311,33 @@ void initState() {
 
   Future<void> _loadUserReports() async {
     try {
-      setState(() => _loadingReports = true);
-      
+      if (mounted) setState(() => _loadingReports = true);
+
       final prefs = await SharedPreferences.getInstance();
       final userEmail = prefs.getString('email');
-      
+
       if (userEmail != null && userEmail.isNotEmpty) {
         final localReports = prefs.getStringList('user_reports_$userEmail') ?? [];
         if (localReports.isNotEmpty) {
           final reports = localReports.map((json) => jsonDecode(json) as Map<String, dynamic>).toList();
-          setState(() => _userReports = reports);
+          if (mounted) setState(() => _userReports = reports);
         }
-        
+
         _loadReportsFromMongoDB(userEmail);
       }
     } catch (e) {
       debugPrint('Error loading user reports: $e');
-      setState(() => _userReports = []);
+      if (mounted) setState(() => _userReports = []);
     } finally {
-      setState(() => _loadingReports = false);
+      if (mounted) setState(() => _loadingReports = false);
     }
   }
-  
+
   Future<void> _loadReportsFromMongoDB(String userEmail) async {
     try {
       final reports = await MongoDatabase.getUserEmergencyReports(userEmail);
       if (reports.isNotEmpty) {
-        setState(() => _userReports = reports);
+        if (mounted) setState(() => _userReports = reports);
         final prefs = await SharedPreferences.getInstance();
         final reportsJson = reports.map((r) => jsonEncode(r)).toList();
         await prefs.setStringList('user_reports_$userEmail', reportsJson);
@@ -378,31 +378,27 @@ void initState() {
     // Check if location services are enabled
     final bool locationServiceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!locationServiceEnabled) {
-      setState(() {
+      if (mounted) setState(() {
         _locationError = 'Location services are disabled. Please enable GPS.';
         _isLoadingLocation = false;
       });
-      
-      // Show dialog to enable location
       _showEnableLocationDialog();
       return;
     }
 
-    setState(() {
+    if (mounted) setState(() {
       _isLoadingLocation = true;
       _locationError = null;
     });
 
     try {
-      // Request permission if not granted
       PermissionStatus permission = await Permission.location.status;
-      
+
       if (!permission.isGranted) {
         permission = await Permission.location.request();
       }
-      
+
       if (permission.isGranted) {
-        // Try to get current position with best accuracy
         Position position = await Geolocator.getCurrentPosition(
           desiredAccuracy: LocationAccuracy.bestForNavigation,
           timeLimit: const Duration(seconds: 15),
@@ -412,47 +408,42 @@ void initState() {
             throw Exception('Location request timeout');
           },
         );
-        
+
         debugPrint('📍 RAW LOCATION: ${position.latitude}, ${position.longitude}');
         debugPrint('📍 ACCURACY: ${position.accuracy} meters');
-        
+
         final List<double> coords = [position.latitude, position.longitude];
-        setState(() {
+        if (mounted) setState(() {
           _currentPosition = coords;
         });
-        
+
         if (widget.onLocated != null) {
           widget.onLocated!(coords);
         }
-        
-        // Get detailed address using multiple methods
+
         await _getAddressFromNominatim(position.latitude, position.longitude);
-        
-        setState(() {
+
+        if (mounted) setState(() {
           _isLoadingLocation = false;
         });
-        
+
       } else if (permission.isDenied) {
-        setState(() {
+        if (mounted) setState(() {
           _locationError = 'Location permission denied. Please enable location access.';
           _isLoadingLocation = false;
         });
-        
-        // Show explanation dialog
         _showPermissionDialog();
-        
+
       } else if (permission.isPermanentlyDenied) {
-        setState(() {
+        if (mounted) setState(() {
           _locationError = 'Location permission permanently denied. Please enable from settings.';
           _isLoadingLocation = false;
         });
-        
-        // Open app settings
         _showOpenSettingsDialog();
       }
     } catch (err) {
       debugPrint('Geolocation Error: ${err.toString()}');
-      setState(() {
+      if (mounted) setState(() {
         _locationError = 'Unable to get location: ${err.toString()}';
         _isLoadingLocation = false;
       });
@@ -619,6 +610,7 @@ void initState() {
         final address = data['address'];
         
         if (address != null) {
+          if (!mounted) return;
           setState(() {
             // Extract address components
             _street = '';
@@ -745,7 +737,8 @@ void initState() {
       
       if (placemarks.isNotEmpty) {
         final Placemark place = placemarks[0];
-        
+
+        if (!mounted) return;
         setState(() {
           final List<String> addressParts = [];
           
@@ -800,7 +793,7 @@ void initState() {
           debugPrint('✅ GEOCODING ADDRESS: $_detailedAddress');
         });
       } else {
-        setState(() {
+        if (mounted) setState(() {
           _detailedAddress = 'Unable to get address';
           _exactAddress = 'Please enter your exact location';
           _locationError = 'Could not find address. Please enter manually.';
@@ -808,7 +801,7 @@ void initState() {
       }
     } catch (e) {
       debugPrint('Geocoding error: $e');
-      setState(() {
+      if (mounted) setState(() {
         _detailedAddress = 'Error getting address';
         _exactAddress = 'Please enter your location manually';
         _locationError = 'Failed to get address. Please enter manually.';

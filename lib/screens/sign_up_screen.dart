@@ -1,7 +1,11 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sign_up.dart';
-import '../dbhelper/mongodb.dart';
+import '../services/api_service.dart';
+import '../services/auth_service.dart';
+import '../services/hive_service.dart';
 import 'home_screen.dart';
 
 // Antipolo City specific barangays (Updated)
@@ -117,135 +121,85 @@ class _SignUpScreenState extends State<SignUpScreen> {
   }
 
   Future<void> _handleSignUp() async {
-    print('SIGN UP BUTTON PRESSED');
-    print('Name: ${_nameController.text}');
-    print('Email: ${_emailController.text}');
-    print('Barangay: $_selectedBarangay');
-    
-    if (!_validateForm()) {
-      print('Validation failed');
-      return;
-    }
-    
-    print('Validation passed');
+    if (!_validateForm()) return;
 
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
-      print('Checking if email exists...');
-      var existingUser = await MongoDatabase.findUserByEmail(
-        _emailController.text.trim().toLowerCase()
-      );
-      
-      if (existingUser != null) {
-        print('Email already exists');
-        _showErrorDialog(
-          'Email Already Registered',
-          'This email is already registered. Please use a different email or sign in.'
-        );
-        setState(() {
-          _isLoading = false;
-        });
-        return;
-      }
-
-      print('Preparing user data...');
       String fullAddress = _streetDetailsController.text.trim();
       if (_landmarkController.text.trim().isNotEmpty) {
         fullAddress += ' (Near: ${_landmarkController.text.trim()})';
       }
       fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
 
-      Map<String, dynamic> userData = {
-        'name': _nameController.text.trim(),
-        'email': _emailController.text.trim().toLowerCase(),
-        'password': _passwordController.text,
-        'address': fullAddress,
-        'barangay': _selectedBarangay!.trim(),
-        'streetDetails': _streetDetailsController.text.trim(),
-        'landmark': _landmarkController.text.trim(),
-        'region': 'CALABARZON (Region IV-A)',
-        'province': 'Rizal',
-        'city': 'Antipolo City',
-        'postalCode': '1870',
-        'isActive': true,
-        'role': 'resident',
-        'createdAt': DateTime.now().toIso8601String(),
-        'emailVerified': false,
-      };
+      final response = await http.post(
+        Uri.parse('${ApiService.baseUrl}/api/auth/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': _nameController.text.trim(),
+          'email': _emailController.text.trim().toLowerCase(),
+          'password': _passwordController.text,
+          'address': fullAddress,
+        }),
+      );
 
-      print('Inserting user to MongoDB...');
-      bool success = await MongoDatabase.insertUser(userData);
+      if (!mounted) return;
 
-      if (success) {
-        print('User inserted successfully');
-        
-        // Save user data to SharedPreferences
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final body = jsonDecode(response.body);
+        final token = body['token'] as String;
+        final userData = Map<String, dynamic>.from(body['user'] as Map);
+
+        final authService = AuthService();
+        await authService.saveAuthData(token: token, userData: userData);
+        await HiveService.setLoggedIn(true);
+        await HiveService.saveUserSession(userData);
         await _saveUserDataToPreferences();
-        
-        // Show success message first
-        await _showSuccessMessageAndAutoSignIn();
-        
+
+        await _showSuccessMessageAndNavigate(
+          userData['name'] ?? _nameController.text.trim(),
+          _emailController.text.trim(),
+          fullAddress,
+        );
       } else {
-        print('Failed to insert user');
+        final body = jsonDecode(response.body);
         _showErrorDialog(
           'Registration Failed',
-          'Failed to create account. Please try again.'
+          body['error'] ?? 'Failed to create account. Please try again.',
         );
-        setState(() {
-          _isLoading = false;
-        });
+        setState(() => _isLoading = false);
       }
     } catch (error) {
-      print('Signup error: $error');
-      print('Stack trace: ${StackTrace.current}');
       _showErrorDialog(
         'Registration Error',
-        'Error: ${error.toString()}\n\nPlease check your internet connection and try again.'
+        'Please check your internet connection and try again.',
       );
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _showSuccessMessageAndAutoSignIn() async {
-    String fullAddress = _streetDetailsController.text.trim();
-    if (_landmarkController.text.trim().isNotEmpty) {
-      fullAddress += ' (Near: ${_landmarkController.text.trim()})';
-    }
-    fullAddress += ', ${_selectedBarangay!.trim()}, Antipolo City, Rizal';
-
-    // Show success dialog with auto-sign in message
+  Future<void> _showSuccessMessageAndNavigate(String name, String email, String address) async {
+    setState(() => _isLoading = false);
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: Row(
-          children: const [
+        title: const Row(
+          children: [
             Icon(Icons.check_circle, color: Colors.green, size: 28),
             SizedBox(width: 10),
-            Text(
-              'Successful!',
-              style: TextStyle(color: Colors.green),
-            ),
+            Text('Successful!', style: TextStyle(color: Colors.green)),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Welcome to E-Telly!',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            const Text('Welcome to E-Telly!', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
-            Text('Name: ${_nameController.text.trim()}'),
-            Text('Email: ${_emailController.text.trim()}'),
-            Text('Barangay: ${_selectedBarangay!.trim()}'),
-            Text('Address: $fullAddress'),
+            Text('Name: $name'),
+            Text('Email: $email'),
+            Text('Address: $address'),
             const SizedBox(height: 15),
             Container(
               padding: const EdgeInsets.all(10),
@@ -254,13 +208,13 @@ class _SignUpScreenState extends State<SignUpScreen> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Colors.green.shade200),
               ),
-              child: Row(
-                children: const [
+              child: const Row(
+                children: [
                   Icon(Icons.info_outline, color: Colors.green, size: 20),
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'You will be automatically signed in to your account.',
+                      'You are now signed in to your account.',
                       style: TextStyle(fontSize: 12, color: Colors.green),
                     ),
                   ),
@@ -271,75 +225,21 @@ class _SignUpScreenState extends State<SignUpScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () async {
-              Navigator.pop(context); // Close dialog
-              await _autoSignIn(); // Proceed with auto sign in
+            onPressed: () {
+              Navigator.pop(context);
+              if (mounted) {
+                Navigator.pushAndRemoveUntil(
+                  context,
+                  MaterialPageRoute(builder: (context) => const HomeScreen()),
+                  (route) => false,
+                );
+              }
             },
-            child: const Text(
-              'Continue',
-              style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
-            ),
+            child: const Text('Continue', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
     );
-  }
-
-  Future<void> _autoSignIn() async {
-    try {
-      print('Auto signing in user...');
-      setState(() {
-        _isLoading = true;
-      });
-      
-      // Save login state using SharedPreferences
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('isLoggedIn', true);
-      await prefs.setString('userEmail', _emailController.text.trim().toLowerCase());
-      await prefs.setString('userName', _nameController.text.trim());
-      await prefs.setString('userRole', 'resident');
-      
-      print('Auto sign in successful');
-      
-      // Show snackbar message before navigating
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: const [
-                Icon(Icons.check_circle, color: Colors.white, size: 20),
-                SizedBox(width: 10),
-                Text('Signed in successfully! Redirecting...'),
-              ],
-            ),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-        
-        // Wait a moment for snackbar to show
-        await Future.delayed(const Duration(seconds: 1));
-        
-        // Navigate to home screen directly and remove all previous routes
-        if (mounted) {
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (context) => const HomeScreen()),
-            (route) => false,
-          );
-        }
-      }
-      
-    } catch (e) {
-      print('Auto sign in error: $e');
-      setState(() {
-        _isLoading = false;
-      });
-      _showErrorDialog(
-        'Auto Sign In Failed',
-        'Account created successfully but auto sign in failed. Please login manually.'
-      );
-    }
   }
 
   Future<void> _saveUserDataToPreferences() async {

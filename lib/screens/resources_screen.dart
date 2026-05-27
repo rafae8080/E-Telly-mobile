@@ -3,8 +3,13 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:e_telly_app/dbhelper/mongodb.dart';
+import '../constants.dart';
+import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../widgets/resources.dart' as resources;
+import 'community_board_screen.dart';
+import 'my_requests_screen.dart';
+import 'my_pledges_screen.dart';
 
 class MyRequest {
   final String id;
@@ -73,14 +78,14 @@ class ResourcesScreen extends StatefulWidget {
   final ValueChanged<String>? onTabSelected;
   final String? userId;
 
-  const ResourcesScreen({super.key, this.onBackPressed, this.onTabSelected, this.userId});
+  const ResourcesScreen(
+      {super.key, this.onBackPressed, this.onTabSelected, this.userId});
 
   @override
   State<ResourcesScreen> createState() => _ResourcesScreenState();
 }
 
 class _ResourcesScreenState extends State<ResourcesScreen> {
-  String _activeTab = 'donate';
   String? _selectedResource;
   bool _showModal = false;
   bool _isLoading = true;
@@ -94,40 +99,38 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   String _requestQuantity = '1';
   bool _requestUrgent = false;
   String _requestNotes = '';
+  final TextEditingController _barangayController = TextEditingController();
 
-  // Donation-specific fields - Location
-  bool _isLoadingLocation = false;
-  String? _locationError;
-  String _exactAddress = '';
+  // Location fields (used by address resolution for emergency requests)
   String _detailedAddress = '';
   String _street = '';
   String _barangay = '';
   String _city = '';
   String _province = '';
   String _postalCode = '';
-  
-  // Donation-specific fields - Donor Info
-  bool _isAnonymous = false;
-  final TextEditingController _firstNameController = TextEditingController();
-  final TextEditingController _middleInitialController = TextEditingController();
-  final TextEditingController _lastNameController = TextEditingController();
-  DateTime? _selectedDateOfBirth;
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _phoneController = TextEditingController();
-  String _donationQuantity = '1';
-  String _donationNotes = '';
+
+  String? _userAddress;
 
   List<resources.ResourceItem> _inventoryItems = [];
-  List<MyRequest> _myRequests = [];
-  
-  final ScrollController _scrollController = ScrollController();
+
+  final ApiService _apiService = ApiService();
+  final AuthService _authService = AuthService();
 
   @override
   void initState() {
     super.initState();
     _fetchInventoryItems();
-    _fetchMyRequests();
     _getCurrentLocation();
+    _loadUserAddress();
+  }
+
+  Future<void> _loadUserAddress() async {
+    final userData = await _authService.getUserData();
+    if (userData != null && mounted) {
+      setState(() {
+        _userAddress = userData['address'] as String?;
+      });
+    }
   }
 
   Future<void> _fetchInventoryItems() async {
@@ -137,90 +140,121 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     });
 
     try {
-      await MongoDatabase.connect();
-      
-      final items = await MongoDatabase.getInventoryItems();
-      
-      setState(() {
-        _inventoryItems = items.map((item) {
-          return resources.ResourceItem(
-            id: item['_id']?.toString() ?? '',
-            name: item['name'] ?? '',
-            category: item['category'] ?? 'Other',
-            description: item['description'],
-            icon: _getIconFromName(item['name'] ?? ''),
-            available: (item['quantity'] ?? 0) > 0,
-            estimatedDelivery: 'Within 1-2 hours',
-            unit: item['unit'] ?? 'pcs',
-          );
-        }).toList();
-        _isLoading = false;
-      });
-      
-      print('Loaded ${_inventoryItems.length} inventory items');
+      final response = await http.get(
+        Uri.parse('${ApiService.baseUrl}/api/inventory/public'),
+      );
+
+      if (response.statusCode == 200) {
+        if (response.body.trimLeft().startsWith('<')) {
+          setState(() {
+            _errorMessage =
+                'Inventory service unavailable. Please try again later.';
+            _isLoading = false;
+          });
+          return;
+        }
+        final body = jsonDecode(response.body);
+        final List<dynamic> items = _extractList(body);
+        setState(() {
+          _inventoryItems = items.map((item) {
+            return resources.ResourceItem(
+              id: item['_id']?.toString() ?? '',
+              name: item['name'] ?? '',
+              category: item['category'] ?? 'Other',
+              description: item['description'],
+              icon: _getIconFromName(item['name'] ?? ''),
+              available: (item['quantity'] ?? 0) > 0,
+              estimatedDelivery: 'Within 1-2 hours',
+              unit: item['unit'] ?? 'pcs',
+            );
+          }).toList();
+          _isLoading = false;
+        });
+      } else {
+        setState(() {
+          _errorMessage = 'Failed to load items (HTTP ${response.statusCode})';
+          _isLoading = false;
+        });
+      }
     } catch (e) {
       setState(() {
         _errorMessage = 'Failed to load items: ${e.toString()}';
         _isLoading = false;
       });
-      print('Error fetching inventory: $e');
+    }
+  }
+
+  /// Maps any inventory category string to a valid ResourceRequest enum value:
+  /// ["food","water","clothing","medicine","hygiene","shelter","other"]
+  String _normalizeCategory(String category) {
+    switch (category.toLowerCase().trim()) {
+      case 'food':
+      case 'foods':
+      case 'nutrition':
+        return 'food';
+      case 'water':
+      case 'drinks':
+      case 'beverage':
+        return 'water';
+      case 'clothing':
+      case 'clothes':
+      case 'apparel':
+      case 'garments':
+        return 'clothing';
+      case 'medicine':
+      case 'medical':
+      case 'medication':
+      case 'medicines':
+      case 'health':
+      case 'healthcare':
+        return 'medicine';
+      case 'hygiene':
+      case 'sanitation':
+      case 'personal care':
+        return 'hygiene';
+      case 'shelter':
+      case 'housing':
+      case 'relief goods':
+        return 'shelter';
+      default:
+        return 'other';
     }
   }
 
   IconData _getIconFromName(String name) {
     switch (name.toLowerCase()) {
-      case 'megaphone': return Icons.volume_up;
-      case 'flashlights': return Icons.flashlight_on;
-      case 'aa batteries': return Icons.battery_alert;
-      case 'generator fuel (diesel)': return Icons.local_gas_station;
-      default: return Icons.inventory;
+      case 'megaphone':
+        return Icons.volume_up;
+      case 'flashlights':
+        return Icons.flashlight_on;
+      case 'aa batteries':
+        return Icons.battery_alert;
+      case 'generator fuel (diesel)':
+        return Icons.local_gas_station;
+      default:
+        return Icons.inventory;
     }
   }
 
-  Future<void> _fetchMyRequests() async {
-    if (widget.userId == null) return;
-    
-    try {
-      final requestsData = await MongoDatabase.getUserRequests(widget.userId!);
-      final donationsData = await MongoDatabase.getUserDonations(widget.userId!);
-      
-      List<MyRequest> allItems = [];
-      
-      for (var request in requestsData) {
-        allItems.add(MyRequest.fromJson(request));
+  List<dynamic> _extractList(dynamic body) {
+    if (body is List) return body;
+    if (body is Map) {
+      for (final key in ['data', 'requests', 'donations', 'items', 'results']) {
+        if (body[key] is List) return body[key] as List;
       }
-      
-      for (var donation in donationsData) {
-        allItems.add(MyRequest.fromJson(donation));
-      }
-      
-      allItems.sort((a, b) => b.date.compareTo(a.date));
-      
-      setState(() {
-        _myRequests = allItems;
-      });
-    } catch (e) {
-      print('Error fetching requests: $e');
     }
+    return [];
   }
 
   // ============ LOCATION METHODS ============
-  
+
   Future<void> _getCurrentLocation() async {
-    final bool locationServiceEnabled = await Geolocator.isLocationServiceEnabled();
+    final bool locationServiceEnabled =
+        await Geolocator.isLocationServiceEnabled();
     if (!locationServiceEnabled) {
-      setState(() {
-        _locationError = 'Location services are disabled. Please enable GPS.';
-        _isLoadingLocation = false;
-      });
       _showEnableLocationDialog();
       return;
     }
-
-    setState(() {
-      _isLoadingLocation = true;
-      _locationError = null;
-    });
 
     try {
       Position position = await Geolocator.getCurrentPosition(
@@ -232,49 +266,44 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           throw Exception('Location request timeout');
         },
       );
-      
-      debugPrint('📍 RAW LOCATION: ${position.latitude}, ${position.longitude}');
-      
+
+      debugPrint(
+          '📍 RAW LOCATION: ${position.latitude}, ${position.longitude}');
+
       setState(() {
         _currentPosition = position;
       });
-      
+
       await _getAddressFromNominatim(position.latitude, position.longitude);
-      
-      setState(() {
-        _isLoadingLocation = false;
-      });
-      
     } catch (err) {
       debugPrint('Geolocation Error: ${err.toString()}');
-      setState(() {
-        _locationError = 'Unable to get location: ${err.toString()}';
-        _isLoadingLocation = false;
-      });
     }
   }
 
-  Future<void> _getAddressFromNominatim(double latitude, double longitude) async {
+  Future<void> _getAddressFromNominatim(
+      double latitude, double longitude) async {
     try {
       debugPrint('📍 Fetching address from Nominatim API...');
-      
-      final url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=$latitude&lon=$longitude&zoom=18&addressdetails=1';
-      
+
+      final url =
+          'https://nominatim.openstreetmap.org/reverse?format=json&lat=$latitude&lon=$longitude&zoom=18&addressdetails=1';
+
       final response = await http.get(
         Uri.parse(url),
         headers: {'User-Agent': 'EmergencyReportApp/1.0'},
       ).timeout(const Duration(seconds: 10));
-      
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final address = data['address'];
-        
+
         if (address != null) {
           setState(() {
             final List<String> addressParts = [];
-            
+
             // Street/Road
-            if (address['road'] != null && address['road'].toString().isNotEmpty) {
+            if (address['road'] != null &&
+                address['road'].toString().isNotEmpty) {
               String houseNumber = address['house_number'] ?? '';
               if (houseNumber.isNotEmpty) {
                 _street = '$houseNumber ${address['road']}';
@@ -283,9 +312,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               }
               addressParts.add(_street);
             }
-            
+
             // Barangay/Village
-            if (address['village'] != null && address['village'].toString().isNotEmpty) {
+            if (address['village'] != null &&
+                address['village'].toString().isNotEmpty) {
               _barangay = address['village'];
               addressParts.add(_barangay);
             } else if (address['neighbourhood'] != null) {
@@ -295,9 +325,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               _barangay = address['suburb'];
               addressParts.add(_barangay);
             }
-            
+
             // City/Municipality
-            if (address['city'] != null && address['city'].toString().isNotEmpty) {
+            if (address['city'] != null &&
+                address['city'].toString().isNotEmpty) {
               _city = address['city'];
               addressParts.add(_city);
             } else if (address['town'] != null) {
@@ -307,97 +338,97 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               _city = address['municipality'];
               addressParts.add(_city);
             }
-            
+
             // Province
-            if (address['state'] != null && address['state'].toString().isNotEmpty) {
+            if (address['state'] != null &&
+                address['state'].toString().isNotEmpty) {
               _province = address['state'];
               addressParts.add(_province);
             } else if (address['province'] != null) {
               _province = address['province'];
               addressParts.add(_province);
             }
-            
+
             // Postal code
-            if (address['postcode'] != null && address['postcode'].toString().isNotEmpty) {
+            if (address['postcode'] != null &&
+                address['postcode'].toString().isNotEmpty) {
               _postalCode = address['postcode'];
               addressParts.add(_postalCode);
             }
-            
+
             if (addressParts.isNotEmpty) {
               _detailedAddress = addressParts.join(', ');
-              _exactAddress = _detailedAddress;
             } else {
               _detailedAddress = data['display_name'] ?? 'Address not found';
-              _exactAddress = _detailedAddress;
             }
-            
+
             debugPrint('✅ ADDRESS: $_detailedAddress');
           });
+          _barangayController.text = _barangay;
           return;
         }
       }
-      
+
       await _getAddressFromGeocoding(latitude, longitude);
-      
     } catch (e) {
       debugPrint('Nominatim API error: $e');
       await _getAddressFromGeocoding(latitude, longitude);
     }
   }
 
-  Future<void> _getAddressFromGeocoding(double latitude, double longitude) async {
+  Future<void> _getAddressFromGeocoding(
+      double latitude, double longitude) async {
     try {
       final List<Placemark> placemarks = await placemarkFromCoordinates(
-        latitude, 
+        latitude,
         longitude,
         localeIdentifier: 'en_PH',
       ).timeout(const Duration(seconds: 10));
-      
+
       if (placemarks.isNotEmpty) {
         final Placemark place = placemarks[0];
-        
+
         setState(() {
           final List<String> addressParts = [];
-          
+
           if (place.street != null && place.street!.isNotEmpty) {
             _street = place.street!;
             addressParts.add(_street);
           }
-          
+
           if (place.subLocality != null && place.subLocality!.isNotEmpty) {
             _barangay = place.subLocality!;
             addressParts.add(_barangay);
           }
-          
+
           if (place.locality != null && place.locality!.isNotEmpty) {
             _city = place.locality!;
             addressParts.add(_city);
           }
-          
-          if (place.administrativeArea != null && place.administrativeArea!.isNotEmpty) {
+
+          if (place.administrativeArea != null &&
+              place.administrativeArea!.isNotEmpty) {
             _province = place.administrativeArea!;
             addressParts.add(_province);
           }
-          
+
           if (place.postalCode != null && place.postalCode!.isNotEmpty) {
             _postalCode = place.postalCode!;
             addressParts.add(_postalCode);
           }
-          
+
           if (addressParts.isNotEmpty) {
             _detailedAddress = addressParts.join(', ');
-            _exactAddress = _detailedAddress;
           } else {
             _detailedAddress = '${place.name ?? "Location"}';
-            _exactAddress = _detailedAddress;
           }
         });
+        _barangayController.text = _barangay;
       }
     } catch (e) {
       debugPrint('Geocoding error: $e');
       setState(() {
         _detailedAddress = 'Unable to get address';
-        _exactAddress = 'Please enter your location manually';
       });
     }
   }
@@ -407,7 +438,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Location Services Required'),
-        content: const Text('Please enable GPS/location services to donate items.'),
+        content:
+            const Text('Please enable GPS/location services for emergency requests.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -423,224 +455,6 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         ],
       ),
     );
-  }
-
-  Widget _buildLocationStatus() {
-    if (_isLoadingLocation) {
-      return Container(
-        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.blue.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Colors.blue,
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Text('Getting your exact location...'),
-          ],
-        ),
-      );
-    } else if (_locationError != null) {
-      return Container(
-        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.red.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.location_off, size: 16, color: Colors.red),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                _locationError!,
-                style: const TextStyle(fontSize: 11, color: Colors.red),
-              ),
-            ),
-            TextButton(
-              onPressed: _getCurrentLocation,
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      );
-    } else if (_detailedAddress.isNotEmpty && _detailedAddress != 'Getting address...') {
-      return Container(
-        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.green.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.green.withOpacity(0.3)),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(Icons.location_on, size: 16, color: Colors.green),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Pickup Location:', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                  const SizedBox(height: 2),
-                  Text(
-                    _detailedAddress,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (_barangay.isNotEmpty && _city.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      '$_barangay, $_city',
-                      style: const TextStyle(fontSize: 10, color: Colors.grey),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            GestureDetector(
-              onTap: _getCurrentLocation,
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Icon(Icons.refresh, size: 16, color: Colors.green),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  Future<void> _handleSubmitDonation() async {
-    if (_selectedResource == null) return;
-
-    final resource = _inventoryItems.firstWhere(
-      (r) => r.id == _selectedResource,
-    );
-
-    final qty = int.tryParse(_donationQuantity) ?? 1;
-
-    if (qty < 1) {
-      _showAlert('Error', 'Quantity must be at least 1');
-      return;
-    }
-
-    if (_exactAddress.isEmpty && _detailedAddress.isEmpty) {
-      _showAlert('Error', 'Please wait for location or enter manually');
-      return;
-    }
-
-    // Validate only if not anonymous
-    if (!_isAnonymous) {
-      if (_firstNameController.text.trim().isEmpty) {
-        _showAlert('Error', 'Please enter your first name');
-        return;
-      }
-      if (_lastNameController.text.trim().isEmpty) {
-        _showAlert('Error', 'Please enter your last name');
-        return;
-      }
-      if (_selectedDateOfBirth == null) {
-        _showAlert('Error', 'Please select your date of birth');
-        return;
-      }
-      if (_emailController.text.trim().isEmpty) {
-        _showAlert('Error', 'Please enter your email');
-        return;
-      }
-      if (_phoneController.text.trim().isEmpty) {
-        _showAlert('Error', 'Please enter your phone number');
-        return;
-      }
-    }
-
-    final donationData = {
-      'userId': widget.userId,
-      'resourceId': _selectedResource,
-      'resourceName': resource.name,
-      'quantity': qty,
-      'urgent': false,
-      'notes': _donationNotes.trim(),
-      'type': 'donation',
-      'status': 'pending',
-      'date': _formatDateTime(DateTime.now()),
-      'isAnonymous': _isAnonymous,
-      'location': {
-        'exactAddress': _exactAddress,
-        'detailedAddress': _detailedAddress,
-        'street': _street,
-        'barangay': _barangay,
-        'city': _city,
-        'province': _province,
-        'postalCode': _postalCode,
-        'latitude': _currentPosition?.latitude,
-        'longitude': _currentPosition?.longitude,
-      },
-      'donorName': _isAnonymous ? 'Anonymous Donor' : '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}',
-      'donorFirstName': _firstNameController.text.trim(),
-      'donorMiddleInitial': _middleInitialController.text.trim(),
-      'donorLastName': _lastNameController.text.trim(),
-      'dateOfBirth': _selectedDateOfBirth?.toIso8601String(),
-      'donorEmail': _isAnonymous ? 'anonymous@donation.com' : _emailController.text.trim(),
-      'donorPhone': _isAnonymous ? 'N/A' : _phoneController.text.trim(),
-      'pickupAddress': _detailedAddress,
-    };
-
-    try {
-      final success = await MongoDatabase.submitDonation(donationData);
-      
-      if (success) {
-        await _fetchMyRequests();
-        
-        _showAlert(
-          'Donation Submitted!',
-          _isAnonymous
-              ? 'Thank you for your anonymous donation!\n\n'
-                'Item: ${resource.name}\n'
-                'Quantity: $qty\n'
-                'Pickup Location: $_detailedAddress\n\n'
-                'DRRMO will arrange pickup.'
-              : 'Thank you for your generous donation of $qty ${resource.name}!\n\n'
-                'Donor: ${_firstNameController.text} ${_lastNameController.text}\n'
-                'Pickup Location: $_detailedAddress\n\n'
-                'DRRMO will contact you for pickup arrangements.',
-          onOk: () {
-            setState(() {
-              _showModal = false;
-              _donationQuantity = '1';
-              _donationNotes = '';
-              _isAnonymous = false;
-              _selectedResource = null;
-              _firstNameController.clear();
-              _middleInitialController.clear();
-              _lastNameController.clear();
-              _selectedDateOfBirth = null;
-              _emailController.clear();
-              _phoneController.clear();
-            });
-            Future.delayed(const Duration(milliseconds: 300), () {
-              setState(() {
-                _activeTab = 'myRequests';
-              });
-            });
-          },
-        );
-      } else {
-        _showAlert('Error', 'Failed to submit donation');
-      }
-    } catch (e) {
-      _showAlert('Error', 'Failed to submit donation: ${e.toString()}');
-    }
   }
 
   Future<void> _handleSubmitRequest() async {
@@ -666,56 +480,63 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       return;
     }
 
-    // Check stock availability
-    final currentItem = await MongoDatabase.getInventoryItemById(resource.id);
-    if (currentItem != null) {
-      int currentQty = currentItem['quantity'] ?? 0;
-      if (qty > currentQty) {
-        _showAlert('Insufficient Stock', 'Only $currentQty ${resource.unit} available.');
-        return;
-      }
-      await MongoDatabase.updateInventoryQuantity(resource.id, currentQty - qty);
-    }
+    // Build the best available address string for the required `address` field.
+    // Priority: GPS-resolved detailed address → user profile address → barangay name.
+    final String resolvedAddress = (_detailedAddress.isNotEmpty &&
+            _detailedAddress != 'Getting address...' &&
+            _detailedAddress != 'Unable to get address' &&
+            _detailedAddress != 'Please enter your location manually')
+        ? _detailedAddress
+        : (_userAddress != null && _userAddress!.isNotEmpty)
+            ? _userAddress!
+            : _barangay;
 
     final requestData = {
-      'userId': widget.userId,
       'resourceId': _selectedResource,
       'resourceName': resource.name,
+      'itemDescription': resource.name,
+      'category': _normalizeCategory(resource.category),
+      'unit': resource.unit ?? 'pcs',
       'quantity': qty,
-      'urgent': _requestUrgent,
-      'notes': _requestNotes.trim(),
+      'address': resolvedAddress,
+      'barangay': _barangay,
       'requestType': _requestType,
-      'latitude': _currentPosition?.latitude,
-      'longitude': _currentPosition?.longitude,
-      'locationAddress': _currentAddress ?? _detailedAddress,
-      'type': 'request',
-      'status': 'pending',
-      'date': _formatDateTime(DateTime.now()),
+      'reason': _requestNotes.trim(),
+      'gpsLat': _currentPosition?.latitude,
+      'gpsLng': _currentPosition?.longitude,
     };
 
     try {
-      final success = await MongoDatabase.submitRequest(requestData);
-      
+      final response = await _apiService.authenticatedPost(
+          '/api/community/requests', requestData);
+      if (response.statusCode == 409) {
+        _showAlert('Already Requested',
+            'You already have an active request in this category.');
+        return;
+      }
+      final success = response.statusCode == 200 || response.statusCode == 201;
+
       if (success) {
         await _fetchInventoryItems();
-        await _fetchMyRequests();
-        
+
         String message = _requestType == 'standard'
             ? '✅ STANDARD REQUEST SUBMITTED\n\n'
-              'Item: ${resource.name}\n'
-              'Quantity: $qty ${resource.unit}\n\n'
-              '📍 Pick up at: DSWD Office\n'
-              'Navotas City Hall Compound\n\n'
-              'Please bring a valid ID for verification.'
+                'Item: ${resource.name}\n'
+                'Quantity: $qty ${resource.unit}\n\n'
+                '📍 Pick up at: DSWD Office\n'
+                'Navotas City Hall Compound\n\n'
+                'Please bring a valid ID for verification.'
             : '🚨 EMERGENCY REQUEST SENT 🚨\n\n'
-              'Item: ${resource.name}\n'
-              'Quantity: $qty ${resource.unit}\n\n'
-              '📍 Location sent to DSWD\n\n'
-              'Emergency responders have been notified!\n'
-              'Help is on the way!';
+                'Item: ${resource.name}\n'
+                'Quantity: $qty ${resource.unit}\n\n'
+                '📍 Location sent to DSWD\n\n'
+                'Emergency responders have been notified!\n'
+                'Help is on the way!';
 
         _showAlert(
-          _requestType == 'emergency' ? 'EMERGENCY REQUEST' : 'Request Submitted',
+          _requestType == 'emergency'
+              ? 'EMERGENCY REQUEST'
+              : 'Request Submitted',
           message,
           onOk: () {
             setState(() {
@@ -727,35 +548,22 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               _currentPosition = null;
               _selectedResource = null;
             });
-            Future.delayed(const Duration(milliseconds: 300), () {
-              setState(() {
-                _activeTab = 'myRequests';
-              });
-            });
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MyRequestsScreen()),
+            );
           },
         );
       } else {
-        _showAlert('Error', 'Failed to submit request');
+        final body = response.body.length > 300
+            ? response.body.substring(0, 300)
+            : response.body;
+        _showAlert('Error',
+            'Failed to submit request (${response.statusCode}): $body');
       }
     } catch (e) {
       _showAlert('Error', 'Failed to submit request: ${e.toString()}');
     }
-  }
-
-  void _handleDonationSelect(String resourceId) {
-    setState(() {
-      _selectedResource = resourceId;
-      _isAnonymous = false;
-      _firstNameController.clear();
-      _middleInitialController.clear();
-      _lastNameController.clear();
-      _selectedDateOfBirth = null;
-      _emailController.clear();
-      _phoneController.clear();
-      _donationQuantity = '1';
-      _donationNotes = '';
-      _showModal = true;
-    });
   }
 
   void _handleRequestSelect(String resourceId) {
@@ -767,454 +575,206 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     });
   }
 
-  Widget _buildDonationForm() {
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Location Section
-          const Text(
-            'Pickup Location',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          _buildLocationStatus(),
-          const SizedBox(height: 16),
-
-          // Remain Anonymous Checkbox
-          Row(
-            children: [
-              Checkbox(
-                value: _isAnonymous,
-                onChanged: (value) => setState(() => _isAnonymous = value ?? false),
-              ),
-              const Expanded(
-                child: Text(
-                  'Remain Anonymous',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Donor Information (disabled when anonymous)
-          const Text(
-            'Donor Information',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-
-          TextField(
-            controller: _firstNameController,
-            enabled: !_isAnonymous,
-            decoration: InputDecoration(
-              labelText: 'First Name',
-              hintText: 'Enter your first name',
-              border: const OutlineInputBorder(),
-              prefixIcon: const Icon(Icons.person),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          TextField(
-            controller: _middleInitialController,
-            enabled: !_isAnonymous,
-            decoration: InputDecoration(
-              labelText: 'Middle Initial',
-              hintText: 'Enter your middle initial',
-              border: const OutlineInputBorder(),
-              prefixIcon: const Icon(Icons.person_outline),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          TextField(
-            controller: _lastNameController,
-            enabled: !_isAnonymous,
-            decoration: InputDecoration(
-              labelText: 'Last Name',
-              hintText: 'Enter your last name',
-              border: const OutlineInputBorder(),
-              prefixIcon: const Icon(Icons.person),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Date of Birth
-          InkWell(
-            onTap: _isAnonymous ? null : () async {
-              final date = await showDatePicker(
-                context: context,
-                initialDate: DateTime.now().subtract(const Duration(days: 365 * 18)),
-                firstDate: DateTime(1900),
-                lastDate: DateTime.now(),
-              );
-              if (date != null) {
-                setState(() => _selectedDateOfBirth = date);
-              }
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400,
-                ),
-                borderRadius: BorderRadius.circular(8),
-                color: _isAnonymous ? Colors.grey.shade50 : Colors.white,
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.calendar_today,
-                    color: _isAnonymous ? Colors.grey.shade400 : Colors.grey.shade600,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      _selectedDateOfBirth == null
-                          ? 'Date of Birth'
-                          : 'DOB: ${_selectedDateOfBirth!.month}/${_selectedDateOfBirth!.day}/${_selectedDateOfBirth!.year}',
-                      style: TextStyle(
-                        color: _isAnonymous 
-                            ? Colors.grey.shade400 
-                            : (_selectedDateOfBirth == null ? Colors.grey : Colors.black),
-                      ),
+  Widget _buildRequestForm() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Request Type',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: Card(
+                color: _requestType == 'standard' ? Colors.blue.shade50 : null,
+                child: InkWell(
+                  onTap: () => setState(() => _requestType = 'standard'),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Icon(Icons.person_pin_circle,
+                            size: 40, color: Colors.blue.shade700),
+                        const SizedBox(height: 8),
+                        const Text('Standard',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Text('Pick up at DSWD Office',
+                            style: TextStyle(fontSize: 12)),
+                      ],
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
-          if (_selectedDateOfBirth == null && !_isAnonymous)
-            Padding(
-              padding: const EdgeInsets.only(top: 8, left: 12),
-              child: Text(
-                'Date of Birth is required.',
-                style: TextStyle(fontSize: 12, color: Colors.red.shade700),
-              ),
-            ),
-          const SizedBox(height: 12),
-
-          // Email
-          TextField(
-            controller: _emailController,
-            enabled: !_isAnonymous,
-            keyboardType: TextInputType.emailAddress,
-            decoration: InputDecoration(
-              labelText: 'Email',
-              hintText: 'email@example.com',
-              border: const OutlineInputBorder(),
-              prefixIcon: const Icon(Icons.email),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400),
-              ),
-            ),
-          ),
-          if (_emailController.text.isEmpty && !_isAnonymous)
-            Padding(
-              padding: const EdgeInsets.only(top: 8, left: 12),
-              child: Text(
-                'Email is required.',
-                style: TextStyle(fontSize: 12, color: Colors.red.shade700),
-              ),
-            ),
-          const SizedBox(height: 12),
-
-          // Phone
-          TextField(
-            controller: _phoneController,
-            enabled: !_isAnonymous,
-            keyboardType: TextInputType.phone,
-            decoration: InputDecoration(
-              labelText: 'Phone',
-              hintText: '+639XXXXXXXXX',
-              border: const OutlineInputBorder(),
-              prefixIcon: const Icon(Icons.phone),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: _isAnonymous ? Colors.grey.shade300 : Colors.grey.shade400),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // Quantity
-          const Text(
-            'Quantity',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              IconButton(
-                onPressed: () {
-                  int qty = int.tryParse(_donationQuantity) ?? 1;
-                  if (qty > 1) {
-                    setState(() => _donationQuantity = (qty - 1).toString());
-                  }
-                },
-                icon: const Icon(Icons.remove_circle),
-              ),
-              Expanded(
-                child: TextField(
-                  keyboardType: TextInputType.number,
-                  textAlign: TextAlign.center,
-                  controller: TextEditingController(text: _donationQuantity),
-                  onChanged: (value) {
-                    int qty = int.tryParse(value) ?? 1;
-                    if (qty >= 1) {
-                      setState(() => _donationQuantity = qty.toString());
-                    }
-                  },
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed: () {
-                  int qty = int.tryParse(_donationQuantity) ?? 1;
-                  setState(() => _donationQuantity = (qty + 1).toString());
-                },
-                icon: const Icon(Icons.add_circle),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-
-          // Notes
-          TextField(
-            maxLines: 3,
-            decoration: const InputDecoration(
-              labelText: 'Notes (optional)',
-              hintText: 'Add any special instructions...',
-              border: OutlineInputBorder(),
-            ),
-            onChanged: (value) => _donationNotes = value,
-          ),
-          const SizedBox(height: 24),
-
-          // DONATE BUTTON
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: _handleSubmitDonation,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFDC2626),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              child: const Text(
-                'DONATE',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-Widget _buildRequestForm() {
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      const Text(
-        'Request Type',
-        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-      ),
-      const SizedBox(height: 12),
-      Row(
-        children: [
-          Expanded(
-            child: Card(
-              color: _requestType == 'standard' ? Colors.blue.shade50 : null,
-              child: InkWell(
-                onTap: () => setState(() => _requestType = 'standard'),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Icon(Icons.person_pin_circle, size: 40, color: Colors.blue.shade700),
-                      const SizedBox(height: 8),
-                      const Text('Standard', style: TextStyle(fontWeight: FontWeight.bold)),
-                      const Text('Pick up at DSWD Office', style: TextStyle(fontSize: 12)),
-                    ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Card(
+                color: _requestType == 'emergency' ? Colors.red.shade50 : null,
+                child: InkWell(
+                  onTap: () => setState(() => _requestType = 'emergency'),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Icon(Icons.emergency,
+                            size: 40, color: Colors.red.shade700),
+                        const SizedBox(height: 8),
+                        const Text('Emergency',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Text('Send location to DSWD',
+                            style: TextStyle(fontSize: 12)),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Card(
-              color: _requestType == 'emergency' ? Colors.red.shade50 : null,
-              child: InkWell(
-                onTap: () => setState(() => _requestType = 'emergency'),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Icon(Icons.emergency, size: 40, color: Colors.red.shade700),
-                      const SizedBox(height: 8),
-                      const Text('Emergency', style: TextStyle(fontWeight: FontWeight.bold)),
-                      const Text('Send location to DSWD', style: TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-      const SizedBox(height: 24),
-      
-      const Text('Quantity', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-      const SizedBox(height: 8),
-      Row(
-        children: [
-          IconButton(
-            onPressed: () {
-              int qty = int.tryParse(_requestQuantity) ?? 1;
-              if (qty > 1) {
-                setState(() => _requestQuantity = (qty - 1).toString());
-              }
-            },
-            icon: const Icon(Icons.remove_circle),
-          ),
-          Expanded(
-            child: TextField(
-              keyboardType: TextInputType.number,
-              textAlign: TextAlign.center,
-              controller: TextEditingController(text: _requestQuantity),
-              onChanged: (value) {
-                int qty = int.tryParse(value) ?? 1;
-                if (qty >= 1) {
-                  setState(() => _requestQuantity = qty.toString());
+          ],
+        ),
+        const SizedBox(height: 24),
+
+        const Text('Quantity',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            IconButton(
+              onPressed: () {
+                int qty = int.tryParse(_requestQuantity) ?? 1;
+                if (qty > 1) {
+                  setState(() => _requestQuantity = (qty - 1).toString());
                 }
               },
-              decoration: const InputDecoration(border: OutlineInputBorder()),
+              icon: const Icon(Icons.remove_circle),
+            ),
+            Expanded(
+              child: TextField(
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                controller: TextEditingController(text: _requestQuantity),
+                onChanged: (value) {
+                  int qty = int.tryParse(value) ?? 1;
+                  if (qty >= 1) {
+                    setState(() => _requestQuantity = qty.toString());
+                  }
+                },
+                decoration: const InputDecoration(border: OutlineInputBorder()),
+              ),
+            ),
+            IconButton(
+              onPressed: () {
+                int qty = int.tryParse(_requestQuantity) ?? 1;
+                setState(() => _requestQuantity = (qty + 1).toString());
+              },
+              icon: const Icon(Icons.add_circle),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        TextField(
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: 'Reason (optional)',
+            border: OutlineInputBorder(),
+          ),
+          onChanged: (value) => _requestNotes = value,
+        ),
+        const SizedBox(height: 12),
+
+        const Text('Barangay',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _barangayController,
+          decoration: const InputDecoration(
+            hintText: 'e.g. Bagong Nayon',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.location_city),
+          ),
+        ),
+
+        if (_requestType == 'emergency') ...[
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.red.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.red.shade200),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.location_on, color: Colors.red.shade700),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _currentAddress != null
+                            ? _currentAddress!
+                            : (_detailedAddress.isNotEmpty
+                                ? _detailedAddress
+                                : 'No location captured'),
+                        style: TextStyle(color: Colors.red.shade900),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isGettingLocation ? null : _getCurrentLocation,
+                    icon: _isGettingLocation
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.my_location),
+                    label: Text(_currentPosition == null
+                        ? 'Share My Location'
+                        : 'Update Location'),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade700),
+                  ),
+                ),
+              ],
             ),
           ),
-          IconButton(
-            onPressed: () {
-              int qty = int.tryParse(_requestQuantity) ?? 1;
-              setState(() => _requestQuantity = (qty + 1).toString());
-            },
-            icon: const Icon(Icons.add_circle),
-          ),
         ],
-      ),
-      const SizedBox(height: 12),
-      
-      TextField(
-        maxLines: 3,
-        decoration: const InputDecoration(
-          labelText: 'Notes (optional)',
-          border: OutlineInputBorder(),
-        ),
-        onChanged: (value) => _requestNotes = value,
-      ),
-      
-      if (_requestType == 'emergency') ...[
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.red.shade50,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.red.shade200),
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.location_on, color: Colors.red.shade700),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _currentAddress != null 
-                          ? _currentAddress! 
-                          : (_detailedAddress.isNotEmpty ? _detailedAddress : 'No location captured'),
-                      style: TextStyle(color: Colors.red.shade900),
-                    ),
-                  ),
-                ],
+        const SizedBox(height: 24),
+
+        // REQUEST BUTTON
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: _handleSubmitRequest,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _requestType == 'emergency'
+                  ? Colors.red.shade700
+                  : Colors.blue.shade700,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
               ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _isGettingLocation ? null : _getCurrentLocation,
-                  icon: _isGettingLocation
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.my_location),
-                  label: Text(_currentPosition == null ? 'Share My Location' : 'Update Location'),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700),
-                ),
+            ),
+            child: Text(
+              _requestType == 'emergency'
+                  ? 'SUBMIT EMERGENCY REQUEST'
+                  : 'SUBMIT REQUEST',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
               ),
-            ],
+            ),
           ),
         ),
       ],
-      const SizedBox(height: 24),
-
-      // REQUEST BUTTON
-      SizedBox(
-        width: double.infinity,
-        child: ElevatedButton(
-          onPressed: _handleSubmitRequest,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _requestType == 'emergency' ? Colors.red.shade700 : Colors.blue.shade700,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-          child: Text(
-            _requestType == 'emergency' ? 'SUBMIT EMERGENCY REQUEST' : 'SUBMIT REQUEST',
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ),
-    ],
-  );
-}
-
-  void _handleCancelRequest(String requestId) {
-    _showConfirmDialog(
-      'Cancel',
-      'Are you sure you want to cancel this?',
-      onConfirm: () async {
-        await MongoDatabase.cancelRequest(requestId);
-        await MongoDatabase.cancelDonation(requestId);
-        await _fetchMyRequests();
-        _showAlert('Cancelled', 'Your item has been cancelled.');
-      },
     );
-  }
-
-  String _formatDateTime(DateTime date) {
-    return '${date.month}/${date.day}/${date.year} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
   }
 
   void _showAlert(String title, String message, {VoidCallback? onOk}) {
@@ -1236,35 +796,20 @@ Widget _buildRequestForm() {
     );
   }
 
-  void _showConfirmDialog(String title, String message, {required VoidCallback onConfirm}) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('No')),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              onConfirm();
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Yes'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Color _getCategoryColor(String category) {
     switch (category.toLowerCase()) {
-      case 'water': return const Color(0xFF06B6D4);
-      case 'food': return const Color(0xFFF59E0B);
-      case 'clothes': return const Color(0xFF10B981);
-      case 'medical': return const Color(0xFFDC2626);
-      case 'communication': return const Color(0xFF3B82F6);
-      default: return const Color(0xFF666666);
+      case 'water':
+        return const Color(0xFF06B6D4);
+      case 'food':
+        return const Color(0xFFF59E0B);
+      case 'clothes':
+        return const Color(0xFF10B981);
+      case 'medical':
+        return const Color(0xFFDC2626);
+      case 'communication':
+        return const Color(0xFF3B82F6);
+      default:
+        return const Color(0xFF666666);
     }
   }
 
@@ -1274,58 +819,100 @@ Widget _buildRequestForm() {
 
   @override
   void dispose() {
-    _firstNameController.dispose();
-    _middleInitialController.dispose();
-    _lastNameController.dispose();
-    _emailController.dispose();
-    _phoneController.dispose();
-    _scrollController.dispose();
+    _barangayController.dispose();
     super.dispose();
+  }
+
+  void _showItemPickerSheet() {
+    if (_isLoading) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Loading resources, please wait...')),
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        builder: (_, scroll) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Row(
+                children: [
+                  const Text(
+                    'Select a Resource',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                controller: scroll,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: resources.RequestContent(
+                  items: _inventoryItems,
+                  getCategoryColor: _getCategoryColor,
+                  onItemSelect: (id) {
+                    Navigator.pop(ctx);
+                    _handleRequestSelect(id);
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showItemPickerSheet,
+        icon: const Icon(Icons.add),
+        label: const Text('Request Resources'),
+        backgroundColor: ET_BLUE,
+      ),
       body: Stack(
         children: [
-          Column(
-            children: [
-              const SizedBox(height: 3),
-              resources.TabBar(
-                activeTab: _activeTab,
-                onTabChanged: (tab) => setState(() => _activeTab = tab),
-              ),
-              Expanded(
-                child: _isLoading
-                    ? const Center(child: CircularProgressIndicator())
-                    : _errorMessage != null
-                        ? Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(Icons.error_outline, size: 64, color: Colors.red),
-                                const SizedBox(height: 16),
-                                Text(_errorMessage!, textAlign: TextAlign.center),
-                                const SizedBox(height: 16),
-                                ElevatedButton(
-                                  onPressed: () {
-                                    _fetchInventoryItems();
-                                    _fetchMyRequests();
-                                  },
-                                  child: const Text('Retry'),
-                                ),
-                              ],
-                            ),
-                          )
-                        : SingleChildScrollView(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.all(20),
-                            child: _buildContent(),
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _errorMessage != null
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.error_outline,
+                              size: 64, color: Colors.red),
+                          const SizedBox(height: 16),
+                          Text(_errorMessage!, textAlign: TextAlign.center),
+                          const SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: _fetchInventoryItems,
+                            child: const Text('Retry'),
                           ),
-              ),
-            ],
-          ),
+                        ],
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(20),
+                      child: _buildCommunityHub(),
+                    ),
           if (_showModal)
             GestureDetector(
               onTap: () => setState(() => _showModal = false),
@@ -1335,23 +922,19 @@ Widget _buildRequestForm() {
             Positioned.fill(
               child: resources.ResourceModal(
                 resource: null,
-                activeTab: _activeTab,
-                quantity: _activeTab == 'request' ? _requestQuantity : _donationQuantity,
+                activeTab: 'request',
+                quantity: _requestQuantity,
                 urgent: _requestUrgent,
-                notes: _activeTab == 'request' ? _requestNotes : _donationNotes,
+                notes: _requestNotes,
                 getCategoryColor: _getCategoryColor,
                 getCategoryName: _getCategoryName,
                 onClose: () => setState(() => _showModal = false),
-                onQuantityChanged: _activeTab == 'request' 
-                    ? (qty) => setState(() => _requestQuantity = qty)
-                    : (qty) => setState(() => _donationQuantity = qty),
+                onQuantityChanged: (qty) => setState(() => _requestQuantity = qty),
                 onUrgentChanged: (value) => setState(() => _requestUrgent = value),
-                onNotesChanged: _activeTab == 'request'
-                    ? (text) => setState(() => _requestNotes = text)
-                    : (text) => setState(() => _donationNotes = text),
-                onSubmit: _activeTab == 'donate' ? _handleSubmitDonation : _handleSubmitRequest,
+                onNotesChanged: (text) => setState(() => _requestNotes = text),
+                onSubmit: _handleSubmitRequest,
                 onContactSupport: () {},
-                customContent: _activeTab == 'donate' ? _buildDonationForm() : _buildRequestForm(),
+                customContent: _buildRequestForm(),
               ),
             ),
         ],
@@ -1359,41 +942,127 @@ Widget _buildRequestForm() {
     );
   }
 
-  Widget _buildContent() {
-    switch (_activeTab) {
-      case 'donate':
-        return resources.DonateContent(
-          items: _inventoryItems,
-          getCategoryColor: _getCategoryColor,
-          onItemSelect: _handleDonationSelect,
-        );
-      case 'request':
-        return resources.RequestContent(
-          items: _inventoryItems,
-          getCategoryColor: _getCategoryColor,
-          onItemSelect: _handleRequestSelect,
-        );
-      case 'myRequests':
-        return resources.MyRequestsContent(
-          requests: _myRequests.map((req) => resources.MyRequest(
-            id: req.id,
-            resourceId: req.resourceId,
-            quantity: req.quantity,
-            urgent: req.urgent,
-            notes: req.notes,
-            status: req.status,
-            date: req.date,
-            type: req.type,
-          )).toList(),
-          donatableItems: _inventoryItems,
-          requestableItems: _inventoryItems,
-          getDonateCategoryColor: _getCategoryColor,
-          getRequestCategoryColor: _getCategoryColor,
-          onCancelRequest: _handleCancelRequest,
-          onShowAlert: (title, message) => _showAlert(title, message),
-        );
-      default:
-        return Container();
-    }
+  Widget _buildCommunityHub() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [ET_BLUE.withOpacity(0.08), ET_PURPLE.withOpacity(0.06)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: ET_BLUE.withOpacity(0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.people_alt, color: ET_BLUE, size: 20),
+                  SizedBox(width: 8),
+                  Text('Community Resource Sharing',
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: ET_BLUE)),
+                ],
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Browse what your community needs, offer to help, and coordinate deliveries directly with your neighbors.',
+                style: TextStyle(fontSize: 12, color: ET_GRAY),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _communityNavCard(
+          icon: Icons.people_alt,
+          color: ET_BLUE,
+          title: 'People in Need',
+          subtitle: 'See open resource requests from your barangay and offer to help',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const CommunityBoardScreen()),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _communityNavCard(
+          icon: Icons.inventory_2,
+          color: ET_PURPLE,
+          title: 'My Requests',
+          subtitle:
+              'Track your posted requests and review offers from neighbors',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const MyRequestsScreen()),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _communityNavCard(
+          icon: Icons.handshake,
+          color: ET_GREEN,
+          title: 'My Pledges',
+          subtitle: 'See requests you\'ve offered to help with',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const MyPledgesScreen()),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _communityNavCard({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text(subtitle,
+                        style: const TextStyle(fontSize: 12, color: ET_GRAY)),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: ET_GRAY),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

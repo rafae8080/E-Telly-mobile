@@ -55,9 +55,10 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - .env
     - assets/images/
-    - assets/icons/ 
-    - assets/fonts/   
+    - assets/icons/
+    - assets/fonts/
     - assets/videos/Firstaid.mp4
     - assets/videos/Earthquake.mp4
     - assets/videos/Flood.mp4

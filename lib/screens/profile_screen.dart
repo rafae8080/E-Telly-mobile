@@ -173,6 +173,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _checkAuthAndLoadProfile() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
     });
@@ -204,6 +205,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _loadUserProfile() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
     });
@@ -215,6 +217,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       
       if (_userEmail == null || _userEmail!.isEmpty) {
         print('No logged in user found');
+        if (!mounted) return;
         setState(() {
           _isLoading = false;
         });
@@ -228,14 +231,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
       
       if (userData != null) {
         print('User data found: ${userData['email']}');
-        
+
         String fullName = userData['name'] ?? '';
         String email = userData['email'] ?? '';
         String barangay = userData['barangay'] ?? '';
         String streetDetails = userData['streetDetails'] ?? '';
         String role = userData['role'] ?? 'resident';
         String landmark = userData['landmark'] ?? '';
-        
+
+        if (!mounted) return;
         setState(() {
           _profile = UserProfile(
             id: userData['_id']?.toString(),
@@ -264,6 +268,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         });
       } else {
         print('No user data found in MongoDB for email: $_userEmail');
+        if (!mounted) return;
         setState(() {
           _isLoading = false;
         });
@@ -271,6 +276,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       }
     } catch (error) {
       print('Error loading profile: $error');
+      if (!mounted) return;
       setState(() {
         _isLoading = false;
       });
@@ -279,17 +285,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
   
   Future<void> _updateJWTToken() async {
+    // Only update the locally-cached user data — never replace the server-issued JWT.
+    // Generating a local JWT with a different secret breaks server-side auth
+    // (ownership checks return 403 because req.user.id won't match stored userId).
     try {
       final userMap = _profile.toMap();
-      final newToken = JwtService.generateToken(userMap);
-      await _authService.saveAuthData(
-        token: newToken,
-        userData: userMap,
-      );
+      await _authService.updateUserData(userMap);
       await HiveService.setLoggedIn(true);
-      print('JWT token updated successfully');
+      print('Local user data cache updated (server JWT preserved)');
     } catch (e) {
-      print('Error updating JWT token: $e');
+      print('Error updating local user data: $e');
     }
   }
   

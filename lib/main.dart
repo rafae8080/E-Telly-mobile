@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -6,6 +7,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'services/offline_report_storage.dart';
 import 'services/hive_service.dart';
 import 'services/auth_service.dart';
+import 'services/api_service.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/alerts_screen.dart';
@@ -16,6 +18,9 @@ import 'screens/login_screen.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/sign_up_screen.dart';
 import 'screens/profile_screen.dart';
+import 'screens/community_board_screen.dart';
+import 'screens/my_requests_screen.dart';
+import 'screens/my_pledges_screen.dart';
 import 'services/relay_queue_manager.dart';
 import 'services/internet_checker_service.dart';
 import 'services/notification_service.dart';
@@ -25,6 +30,7 @@ import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: '.env');
   
   try {
     await Firebase.initializeApp(
@@ -60,6 +66,7 @@ void main() async {
   if (isJwtValid) {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await NotificationService.postLoginSetup();
+      await ApiService().refreshProfile();
     });
   }
 
@@ -104,6 +111,9 @@ class EtellyApp extends StatelessWidget {
             '/welcome': (context) => const WelcomeScreen(),
             '/sign-up': (context) => const SignUpScreen(),
             '/profile': (context) => const ProfileScreen(),
+            '/community-board': (context) => const CommunityBoardScreen(),
+            '/my-requests': (context) => const MyRequestsScreen(),
+            '/my-pledges': (context) => const MyPledgesScreen(),
           },
         );
       },

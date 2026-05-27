@@ -1,4 +1,6 @@
-const String MONGO_CONN_URL = "mongodb+srv://admin:VttDX27%40FE87V8i@cluster0.4vcql9o.mongodb.net/etelly?retryWrites=true&w=majority";
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
+String get MONGO_CONN_URL => dotenv.env['MONGO_CONN_URL'] ?? '';
 
 const String DATABASE_NAME = "etelly";
 const String USER_COLLECTION = "users";
