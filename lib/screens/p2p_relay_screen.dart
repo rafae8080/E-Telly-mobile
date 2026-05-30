@@ -139,7 +139,7 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
   Future<void> _triggerManualRelay() async {
     final granted = await _requestPermissions();
     if (!granted) return;
-    await _controller.onReportEnqueued();
+    await _controller.startManualRelay();
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -642,7 +642,7 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
           color: isActive ? Colors.grey : const Color(0xFFDC2626),
         ),
         label: Text(
-          'Manual Relay Trigger',
+          isActive ? 'Already Active' : 'Start Relay (Receive Mode)',
           style: TextStyle(
             fontSize: 13.sp,
             color: isActive ? Colors.grey : const Color(0xFFDC2626),

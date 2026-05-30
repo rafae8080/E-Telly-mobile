@@ -50,6 +50,12 @@ class P2PAutoRelayController {
     }
   }
 
+  /// Manually starts P2P advertising and discovery regardless of connectivity.
+  /// Used by Phone B (receiver) to make itself discoverable without submitting a report.
+  Future<void> startManualRelay() async {
+    await _activate();
+  }
+
   /// Stops auto-relay and clears all state. Safe to call when idle.
   Future<void> stop() async {
     _autoStopTimer?.cancel();
