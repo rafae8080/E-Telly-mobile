@@ -15,6 +15,7 @@ import '../dbhelper/mongodb.dart';
 import '../services/endpoint_resolver.dart';
 import '../services/relay_queue_manager.dart';
 import '../services/internet_checker_service.dart';
+import '../services/p2p_auto_relay_controller.dart';
 import '../screens/p2p_relay_screen.dart';
 
 // Define EmergencyType class
@@ -989,19 +990,19 @@ void initState() {
       
       await _saveToLocalStorage(report);
 
-      await RelayQueueManager.enqueue(report); 
-      
+      await RelayQueueManager.enqueue(report);
+      await P2PAutoRelayController.instance.onReportEnqueued();
+
       setState(() {
         _userReports.insert(0, report);
       });
-      
+
       _showSuccessDialog();
       _resetForm();
-      
+
       if (mounted) setState(() => _isSubmitting = false);
-      
+
       //_saveToMongoDBInBackground(report);
-      await InternetCheckerService.instance.forceFlushIfOnline();
       _syncReportsToLocalStorage();
       
     } catch (e) {
@@ -1462,74 +1463,6 @@ void initState() {
     );
   }
  
-  Widget _buildP2PRelayButton() {
-    final pendingCount = RelayQueueManager.pendingCount;
- 
-    return SizedBox(
-      width: double.infinity,
-      height: 48.h,
-      child: OutlinedButton.icon(
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => const P2PRelayScreen(),
-            ),
-          ).then((_) {
-            // Refresh reports list when returning from P2P screen
-            _loadUserReports();
-          });
-        },
-        icon: Icon(
-          Icons.bluetooth_searching,
-          size: 18.sp,
-          color: const Color(0xFF06B6D4),
-        ),
-        label: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              'Send via Bluetooth',
-              style: TextStyle(
-                fontSize: 13.sp,
-                fontWeight: FontWeight.w600,
-                color: const Color(0xFF06B6D4),
-              ),
-            ),
-            if (pendingCount > 0) ...[
-              SizedBox(width: 8.w),
-              Container(
-                padding: EdgeInsets.symmetric(
-                    horizontal: 7.w, vertical: 2.h),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFDC2626),
-                  borderRadius: BorderRadius.circular(10.r),
-                ),
-                child: Text(
-                  '$pendingCount',
-                  style: TextStyle(
-                    fontSize: 10.sp,
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-        style: OutlinedButton.styleFrom(
-          side: BorderSide(
-            color: const Color(0xFF06B6D4).withOpacity(0.5),
-            width: 1.5.w,
-          ),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12.r),
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildDisclaimer() {
     return Container(
       padding: EdgeInsets.all(12.w),
@@ -1975,12 +1908,12 @@ void initState() {
                         ),
                 ),
               ),
-              SizedBox(height: 10.h),
-              _buildP2PRelayButton(),
-              SizedBox(height: 16.h),
+              SizedBox(height: 12.h),
+              _buildRelayStatusBanner(),
+              SizedBox(height: 12.h),
               _buildDisclaimer(),
               SizedBox(height: 20.h),
-              
+
               Divider(height: 30.h),
               _buildReportStatusSection(),
               SizedBox(height: 20.h),
@@ -1988,6 +1921,81 @@ void initState() {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildRelayStatusBanner() {
+    final controller = P2PAutoRelayController.instance;
+    return ValueListenableBuilder<bool>(
+      valueListenable: controller.isActiveNotifier,
+      builder: (context, isActive, _) {
+        return ValueListenableBuilder<int>(
+          valueListenable: controller.pendingCountNotifier,
+          builder: (context, pendingCount, _) {
+            if (!isActive && pendingCount == 0) return const SizedBox.shrink();
+            return ValueListenableBuilder<String>(
+              valueListenable: controller.statusMessageNotifier,
+              builder: (context, statusMsg, _) {
+                return GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const P2PRelayScreen()),
+                  ),
+                  child: Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 10.h),
+                    decoration: BoxDecoration(
+                      color: isActive
+                          ? const Color(0xFFDC2626).withOpacity(0.06)
+                          : Colors.orange.withOpacity(0.06),
+                      borderRadius: BorderRadius.circular(10.r),
+                      border: Border.all(
+                        color: isActive
+                            ? const Color(0xFFDC2626).withOpacity(0.25)
+                            : Colors.orange.withOpacity(0.25),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        if (isActive)
+                          SizedBox(
+                            width: 14.w,
+                            height: 14.h,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.w,
+                              color: const Color(0xFFDC2626),
+                            ),
+                          )
+                        else
+                          Icon(Icons.cloud_off_rounded,
+                              size: 16.sp, color: Colors.orange),
+                        SizedBox(width: 10.w),
+                        Expanded(
+                          child: Text(
+                            isActive ? statusMsg : '$pendingCount report${pendingCount > 1 ? 's' : ''} queued — tap to view relay',
+                            style: TextStyle(
+                              fontSize: 12.sp,
+                              color: isActive
+                                  ? const Color(0xFFDC2626)
+                                  : Colors.orange[800],
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        Icon(Icons.chevron_right,
+                            size: 18.sp,
+                            color: isActive
+                                ? const Color(0xFFDC2626)
+                                : Colors.orange),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 }

@@ -1,14 +1,29 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'internet_checker_service.dart'; 
 import 'relay_queue_manager.dart';
+
+// ── Connectivity suffix ───────────────────────────────────────────────────────
+
+enum ConnectivitySuffix { online, local, offline }
+
+ConnectivitySuffix parseConnectivitySuffix(String name) {
+  if (name.endsWith('_ONLINE')) return ConnectivitySuffix.online;
+  if (name.endsWith('_LOCAL')) return ConnectivitySuffix.local;
+  return ConnectivitySuffix.offline;
+}
+
+String stripConnectivitySuffix(String name) {
+  for (final s in ['_ONLINE', '_LOCAL', '_OFFLINE']) {
+    if (name.endsWith(s)) return name.substring(0, name.length - s.length);
+  }
+  return name;
+}
 
 // ── Event models ─────────────────────────────────────────────────────────────
 
@@ -20,6 +35,7 @@ class PeerDevice {
   PeerState state;
   int reportsSent;
   int reportsReceived;
+  ConnectivitySuffix connectivity;
 
   PeerDevice({
     required this.endpointId,
@@ -27,7 +43,10 @@ class PeerDevice {
     this.state = PeerState.discovered,
     this.reportsSent = 0,
     this.reportsReceived = 0,
+    this.connectivity = ConnectivitySuffix.offline,
   });
+
+  String get displayName => stripConnectivitySuffix(endpointName);
 }
 
 enum TransferState { idle, sending, receiving, done, error }
@@ -48,14 +67,6 @@ class TransferProgress {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
-/// Manages peer-to-peer report relay using Google Nearby Connections.
-///
-/// Typical flow:
-///   1. Caller invokes [startAdvertisingAndDiscovery].
-///   2. [onPeersChanged] fires whenever the nearby-device list updates.
-///   3. Caller invokes [connectAndSend] with a chosen [endpointId].
-///   4. [onTransferProgress] fires throughout the transfer.
-///   5. Caller invokes [stop] when the screen is closed.
 class P2PRelayService {
   // ── Singleton ───────────────────────────────────────────────────────────────
   P2PRelayService._();
@@ -64,6 +75,7 @@ class P2PRelayService {
   // ── Constants ───────────────────────────────────────────────────────────────
   static const String _serviceId = 'com.android.application.etelly.relay';
   static const Strategy _strategy = Strategy.P2P_CLUSTER;
+  static const int _maxHops = 3;
 
   // ── State ────────────────────────────────────────────────────────────────────
   String? _localDeviceId;
@@ -83,6 +95,14 @@ class P2PRelayService {
   /// Called when a report is successfully received from a peer.
   void Function(String reportId)? onReportReceived;
 
+  // ── Callbacks (set by P2PAutoRelayController) ─────────────────────────────
+
+  /// Fires when a new peer is discovered — wakes the auto-relay controller.
+  void Function(PeerDevice peer)? onPeerDiscoveredAuto;
+
+  /// Fires after reports are received — controller decides whether to upload or keep advertising.
+  void Function()? onReportsReceivedForRelay;
+
   // ── Public API ────────────────────────────────────────────────────────────────
 
   /// Initialises the local device identity from SharedPreferences + DeviceInfo.
@@ -92,19 +112,25 @@ class P2PRelayService {
 
     final info = DeviceInfoPlugin();
     final android = await info.androidInfo;
-    _localDeviceId = android.id; // stable hardware ID
+    _localDeviceId = android.id;
     debugPrint('[P2P] Initialised as "$_localDeviceName" (id: $_localDeviceId)');
   }
 
   /// Starts both advertising (so others find us) and discovery (so we find
-  /// others). Safe to call multiple times — stops first if already running.
-  Future<void> startAdvertisingAndDiscovery() async {
-    if (_isRunning) await stop();
+  /// others). Appends [connectivitySuffix] to the advertised device name.
+  /// Safe to call multiple times — stops first if already running.
+  Future<void> startAdvertisingAndDiscovery({
+    ConnectivitySuffix connectivitySuffix = ConnectivitySuffix.offline,
+  }) async {
+    await stop(); // always clean up OS-level session before starting
     if (_localDeviceName == null) await init();
+
+    final advertisedName =
+        '${_localDeviceName}_${connectivitySuffix.name.toUpperCase()}';
 
     try {
       await Nearby().startAdvertising(
-        _localDeviceName!,
+        advertisedName,
         _strategy,
         onConnectionInitiated: _onConnectionInitiated,
         onConnectionResult: _onConnectionResult,
@@ -113,7 +139,7 @@ class P2PRelayService {
       );
 
       await Nearby().startDiscovery(
-        _localDeviceName!,
+        advertisedName,
         _strategy,
         onEndpointFound: _onEndpointFound,
         onEndpointLost: _onEndpointLost,
@@ -121,7 +147,7 @@ class P2PRelayService {
       );
 
       _isRunning = true;
-      debugPrint('[P2P] Advertising + Discovery started.');
+      debugPrint('[P2P] Advertising + Discovery started as "$advertisedName".');
     } catch (e) {
       debugPrint('[P2P] Failed to start: $e');
       rethrow;
@@ -182,11 +208,14 @@ class P2PRelayService {
 
   void _onEndpointFound(String endpointId, String endpointName, String serviceId) {
     debugPrint('[P2P] Found peer: $endpointName ($endpointId)');
-    _peers[endpointId] = PeerDevice(
+    final peer = PeerDevice(
       endpointId: endpointId,
       endpointName: endpointName,
+      connectivity: parseConnectivitySuffix(endpointName),
     );
+    _peers[endpointId] = peer;
     _notifyPeersChanged();
+    onPeerDiscoveredAuto?.call(peer);
   }
 
   void _onEndpointLost(String? endpointId) {
@@ -198,7 +227,6 @@ class P2PRelayService {
 
   void _onConnectionInitiated(String endpointId, ConnectionInfo info) {
     debugPrint('[P2P] Connection initiated with ${info.endpointName}');
-    // Auto-accept all connections from peers running the same app
     Nearby().acceptConnection(
       endpointId,
       onPayLoadRecieved: _onPayloadReceived,
@@ -211,7 +239,6 @@ class P2PRelayService {
     debugPrint('[P2P] Connection result for $endpointId: $status');
     if (status == Status.CONNECTED) {
       _updatePeerState(endpointId, PeerState.connected);
-      // Now that connection is established, send pending reports
       _sendPendingReports(endpointId);
     } else {
       _updatePeerState(endpointId, PeerState.discovered);
@@ -235,7 +262,6 @@ class P2PRelayService {
     try {
       final jsonString = utf8.decode(bytes);
 
-      // Handle the report-count handshake message
       if (jsonString.startsWith('__COUNT__:')) {
         final count = int.tryParse(jsonString.split(':')[1]) ?? 0;
         debugPrint('[P2P] Peer will send $count report(s).');
@@ -248,7 +274,6 @@ class P2PRelayService {
         return;
       }
 
-      // Handle end-of-transfer sentinel
       if (jsonString == '__DONE__') {
         final peer = _peers[endpointId];
         final received = peer?.reportsReceived ?? 0;
@@ -259,10 +284,10 @@ class P2PRelayService {
           message: 'Received $received report(s) successfully.',
         ));
         debugPrint('[P2P] Transfer complete from $endpointId.');
+        onReportsReceivedForRelay?.call();
         return;
       }
 
-      // It's a report payload
       final entry = RelayQueueManager.fromTransferJson(jsonString);
       if (entry != null) {
         final peerInfo = {
@@ -271,7 +296,6 @@ class P2PRelayService {
           'timestamp': DateTime.now().toIso8601String(),
         };
 
-        // Tag the report as mesh-relayed and preserve the original submission time
         final relayedReport = Map<String, dynamic>.from(entry.report);
         relayedReport['source'] = 'mesh_relay';
         relayedReport.putIfAbsent(
@@ -281,7 +305,6 @@ class P2PRelayService {
           report: relayedReport,
           peerInfo: peerInfo,
         );
-        InternetCheckerService.instance.forceFlush();
 
         _peers[endpointId]?.reportsReceived++;
         final received = _peers[endpointId]?.reportsReceived ?? 1;
@@ -301,22 +324,22 @@ class P2PRelayService {
   }
 
   void _onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {
-    // Nearby Connections fires this for BYTES payloads too, but the
-    // transfer is effectively instant for small JSON. We use our own
-    // __COUNT__ / __DONE__ sentinels for progress instead.
+    // Progress for BYTES payloads is tracked via __COUNT__ / __DONE__ sentinels.
   }
 
   // ── Sending logic ────────────────────────────────────────────────────────────
 
   Future<void> _sendPendingReports(String endpointId) async {
-    final pending = RelayQueueManager.getPending();
+    final pending = RelayQueueManager.getPending()
+        .where((e) => e.hopCount < _maxHops)
+        .toList();
 
     if (pending.isEmpty) {
       onTransferProgress?.call(const TransferProgress(
         state: TransferState.done,
         total: 0,
         current: 0,
-        message: 'No pending reports to send.',
+        message: 'No eligible reports (hop limit reached or queue empty).',
       ));
       await disconnect(endpointId);
       return;
@@ -329,7 +352,6 @@ class P2PRelayService {
       message: 'Sending ${pending.length} report(s)…',
     ));
 
-    // Send count handshake first
     await _sendBytes(endpointId, '__COUNT__:${pending.length}');
 
     int sent = 0;
@@ -356,14 +378,12 @@ class P2PRelayService {
           message: 'Sent $sent of ${pending.length}…',
         ));
 
-        // Small gap between payloads to avoid overwhelming the channel
         await Future.delayed(const Duration(milliseconds: 100));
       } catch (e) {
         debugPrint('[P2P] Failed to send report ${entry.reportId}: $e');
       }
     }
 
-    // Send end sentinel
     await _sendBytes(endpointId, '__DONE__');
 
     onTransferProgress?.call(TransferProgress(
@@ -389,7 +409,6 @@ class P2PRelayService {
     if (_peers.containsKey(endpointId)) {
       _peers[endpointId]!.state = state;
     } else {
-      // Peer may have been discovered by the advertising side, not discovery
       _peers[endpointId] = PeerDevice(
         endpointId: endpointId,
         endpointName: 'Unknown Device',

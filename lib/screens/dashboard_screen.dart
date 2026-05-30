@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../constants.dart';
 import '../widgets/actions.dart';
 import '../widgets/emergency_contacts.dart';
+import '../services/p2p_auto_relay_controller.dart';
+import '../screens/p2p_relay_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   final Function(int)? onNavigateToTab;
@@ -156,6 +158,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 return _buildQuickAction(_quickActions[index]);
               },
             ),
+            const SizedBox(height: 8),
+            _buildP2PRelayCard(),
             const SizedBox(height: 8),
             const Padding(
               padding: EdgeInsets.only(left: 4, top: 4),
@@ -407,6 +411,101 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildP2PRelayCard() {
+    final controller = P2PAutoRelayController.instance;
+    return ValueListenableBuilder<bool>(
+      valueListenable: controller.isActiveNotifier,
+      builder: (context, isActive, _) {
+        return ValueListenableBuilder<int>(
+          valueListenable: controller.pendingCountNotifier,
+          builder: (context, pendingCount, _) {
+            return GestureDetector(
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const P2PRelayScreen()),
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isActive
+                      ? const Color(0xFFDC2626).withOpacity(0.06)
+                      : const Color(0xFF06B6D4).withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isActive
+                        ? const Color(0xFFDC2626).withOpacity(0.25)
+                        : const Color(0xFF06B6D4).withOpacity(0.25),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? const Color(0xFFDC2626).withOpacity(0.1)
+                            : const Color(0xFF06B6D4).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(
+                        Icons.bluetooth_searching,
+                        size: 22,
+                        color: isActive
+                            ? const Color(0xFFDC2626)
+                            : const Color(0xFF06B6D4),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isActive ? 'P2P Relay Active' : 'P2P Mesh Relay',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: isActive
+                                  ? const Color(0xFFDC2626)
+                                  : Colors.black87,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            isActive
+                                ? '$pendingCount report${pendingCount != 1 ? 's' : ''} relaying — tap to monitor'
+                                : 'Tap to receive or send offline reports',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (isActive)
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: const Color(0xFFDC2626),
+                        ),
+                      )
+                    else
+                      const Icon(Icons.chevron_right,
+                          size: 18, color: Colors.grey),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 

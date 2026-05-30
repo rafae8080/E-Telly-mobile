@@ -55,3 +55,4 @@ android/build/
 # Backend handoff docs (local reference only)
 MOBILE_FCM_GUIDE.md
 OFFLINE_IMPLEMENTATION.md
+P2P_MESH_REDESIGN.md

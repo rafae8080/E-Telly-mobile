@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/p2p_auto_relay_controller.dart';
 import '../services/p2p_relay_service.dart';
 import '../services/relay_queue_manager.dart';
 
@@ -17,13 +18,12 @@ class P2PRelayScreen extends StatefulWidget {
 class _P2PRelayScreenState extends State<P2PRelayScreen>
     with SingleTickerProviderStateMixin {
   // ── State ───────────────────────────────────────────────────────────────────
-  bool _isScanning = false;
-  bool _permissionsGranted = false;
+  final _controller = P2PAutoRelayController.instance;
+
   List<PeerDevice> _peers = [];
   TransferProgress _transfer =
       const TransferProgress(state: TransferState.idle);
   int _pendingCount = 0;
-  String? _selectedEndpointId;
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -43,27 +43,37 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
+    _controller.isActiveNotifier.addListener(_onControllerStateChanged);
+    _controller.statusMessageNotifier.addListener(_onControllerStateChanged);
+    _controller.pendingCountNotifier.addListener(_onControllerStateChanged);
+
     _refreshPendingCount();
     _resetFailedReports();
     _initService();
   }
 
-
   @override
   void dispose() {
     _pulseController.dispose();
+    _controller.isActiveNotifier.removeListener(_onControllerStateChanged);
+    _controller.statusMessageNotifier.removeListener(_onControllerStateChanged);
+    _controller.pendingCountNotifier.removeListener(_onControllerStateChanged);
     P2PRelayService.instance.onPeersChanged = null;
     P2PRelayService.instance.onTransferProgress = null;
     P2PRelayService.instance.onReportReceived = null;
-    if (_isScanning) P2PRelayService.instance.stop();
     super.dispose();
+  }
+
+  void _onControllerStateChanged() {
+    if (!mounted) return;
+    setState(() {
+      _pendingCount = _controller.pendingCountNotifier.value;
+    });
   }
 
   // ── Init ─────────────────────────────────────────────────────────────────────
 
   Future<void> _initService() async {
-    await P2PRelayService.instance.init();
-
     P2PRelayService.instance.onPeersChanged = (peers) {
       if (!mounted) return;
       setState(() => _peers = peers);
@@ -91,14 +101,14 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
   }
 
   Future<void> _resetFailedReports() async {
-  final all = RelayQueueManager.getAll();
-  for (final entry in all) {
-    if (entry.status == RelayStatus.failed) {
-      await RelayQueueManager.requeueFailed(entry.reportId);
+    final all = RelayQueueManager.getAll();
+    for (final entry in all) {
+      if (entry.status == RelayStatus.failed) {
+        await RelayQueueManager.requeueFailed(entry.reportId);
+      }
     }
+    _refreshPendingCount();
   }
-  _refreshPendingCount();
-}
 
   // ── Permissions ───────────────────────────────────────────────────────────────
 
@@ -117,8 +127,6 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
       (s) => s == PermissionStatus.granted || s == PermissionStatus.limited,
     );
 
-    setState(() => _permissionsGranted = allGranted);
-
     if (!allGranted) {
       _showPermissionDeniedDialog();
     }
@@ -126,53 +134,12 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
     return allGranted;
   }
 
-  // ── Scan controls ─────────────────────────────────────────────────────────────
+  // ── Manual trigger (capstone demo) ────────────────────────────────────────────
 
-  Future<void> _startScan() async {
+  Future<void> _triggerManualRelay() async {
     final granted = await _requestPermissions();
     if (!granted) return;
-
-    setState(() {
-      _isScanning = true;
-      _peers = [];
-      _transfer = const TransferProgress(state: TransferState.idle);
-      _selectedEndpointId = null;
-    });
-
-    try {
-      await P2PRelayService.instance.startAdvertisingAndDiscovery();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _isScanning = false);
-      _showErrorSnackbar('Failed to start scanning: $e');
-    }
-  }
-
-  Future<void> _stopScan() async {
-    await P2PRelayService.instance.stop();
-    if (!mounted) return;
-    setState(() {
-      _isScanning = false;
-      _peers = [];
-      _selectedEndpointId = null;
-    });
-  }
-
-  Future<void> _sendToPeer(String endpointId) async {
-    if (_pendingCount == 0) {
-      _showErrorSnackbar('No pending reports to send.');
-      return;
-    }
-
-    setState(() {
-      _selectedEndpointId = endpointId;
-      _transfer = const TransferProgress(
-        state: TransferState.sending,
-        message: 'Connecting…',
-      );
-    });
-
-    await P2PRelayService.instance.connectAndSend(endpointId);
+    await _controller.onReportEnqueued();
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -194,20 +161,6 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
           ],
         ),
         backgroundColor: const Color(0xFF10B981),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10.r),
-        ),
-      ),
-    );
-  }
-
-  void _showErrorSnackbar(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message, style: TextStyle(fontSize: 13.sp)),
-        backgroundColor: const Color(0xFFDC2626),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(10.r),
@@ -266,20 +219,19 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
             SizedBox(height: 12.h),
             _howItWorksStep(
               '2',
-              'Scan for nearby devices running this app.',
+              'Auto-Relay activates and scans for nearby devices automatically.',
               Icons.bluetooth_searching,
             ),
             SizedBox(height: 12.h),
             _howItWorksStep(
               '3',
-              'Select a nearby device and send your report to them.',
+              'A nearby device receives your report and carries it closer to the barangay hall.',
               Icons.send,
             ),
             SizedBox(height: 12.h),
             _howItWorksStep(
               '4',
-              'When that device gets internet, it automatically uploads '
-              'the report to the admin.',
+              'When any relay device reaches WiFi or internet, it automatically uploads the report.',
               Icons.cloud_upload_outlined,
             ),
             SizedBox(height: 16.h),
@@ -343,6 +295,9 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isActive = _controller.isActiveNotifier.value;
+    final statusMessage = _controller.statusMessageNotifier.value;
+
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
@@ -377,9 +332,11 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
             SizedBox(height: 16.h),
             _buildRadarSection(),
             SizedBox(height: 20.h),
-            _buildScanButton(),
+            _buildAutoRelayStatusCard(isActive, statusMessage),
+            SizedBox(height: 12.h),
+            _buildManualScanButton(isActive),
             SizedBox(height: 20.h),
-            if (_peers.isNotEmpty || _isScanning) _buildPeerList(),
+            if (_peers.isNotEmpty || isActive) _buildPeerList(isActive),
             if (_transfer.state != TransferState.idle) ...[
               SizedBox(height: 16.h),
               _buildTransferStatus(),
@@ -439,7 +396,7 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
                 SizedBox(height: 2.h),
                 Text(
                   _pendingCount > 0
-                      ? 'Find a nearby device with internet to relay them.'
+                      ? 'Auto-Relay will find a nearby device to forward them.'
                       : 'All reports have been uploaded.',
                   style: TextStyle(
                     fontSize: 11.sp,
@@ -455,6 +412,8 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
   }
 
   Widget _buildRadarSection() {
+    final isActive = _controller.isActiveNotifier.value;
+
     return Center(
       child: SizedBox(
         width: 180.w,
@@ -462,8 +421,7 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
         child: Stack(
           alignment: Alignment.center,
           children: [
-            // Outer pulse ring (only animates while scanning)
-            if (_isScanning)
+            if (isActive)
               AnimatedBuilder(
                 animation: _pulseAnimation,
                 builder: (_, __) => Transform.scale(
@@ -481,31 +439,29 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
                   ),
                 ),
               ),
-            // Middle ring
             Container(
               width: 130.w,
               height: 130.w,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: _isScanning
+                  color: isActive
                       ? const Color(0xFFDC2626).withOpacity(0.25)
                       : Colors.grey.withOpacity(0.2),
                   width: 1.5.w,
                 ),
               ),
             ),
-            // Inner ring
             Container(
               width: 80.w,
               height: 80.w,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: _isScanning
+                color: isActive
                     ? const Color(0xFFDC2626).withOpacity(0.07)
                     : Colors.grey.withOpacity(0.05),
                 border: Border.all(
-                  color: _isScanning
+                  color: isActive
                       ? const Color(0xFFDC2626).withOpacity(0.3)
                       : Colors.grey.withOpacity(0.2),
                   width: 1.5.w,
@@ -514,12 +470,11 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
               child: Icon(
                 Icons.bluetooth_searching,
                 size: 32.sp,
-                color: _isScanning
+                color: isActive
                     ? const Color(0xFFDC2626)
                     : Colors.grey,
               ),
             ),
-            // Peer dots around the radar
             ..._buildPeerDots(),
           ],
         ),
@@ -532,19 +487,29 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
 
     final dots = <Widget>[];
     const positions = [
-      Offset(0, -75),   // top
-      Offset(65, -35),  // top-right
-      Offset(65, 35),   // bottom-right
-      Offset(0, 75),    // bottom
-      Offset(-65, 35),  // bottom-left
-      Offset(-65, -35), // top-left
+      Offset(0, -75),
+      Offset(65, -35),
+      Offset(65, 35),
+      Offset(0, 75),
+      Offset(-65, 35),
+      Offset(-65, -35),
     ];
 
     for (int i = 0; i < _peers.length && i < positions.length; i++) {
       final peer = _peers[i];
       final pos = positions[i];
-      final isSelected = peer.endpointId == _selectedEndpointId;
       final isConnected = peer.state == PeerState.connected;
+
+      Color dotColor() {
+        switch (peer.connectivity) {
+          case ConnectivitySuffix.online:
+            return Colors.green;
+          case ConnectivitySuffix.local:
+            return const Color(0xFF3B82F6);
+          case ConnectivitySuffix.offline:
+            return const Color(0xFF06B6D4);
+        }
+      }
 
       dots.add(
         Transform.translate(
@@ -553,21 +518,14 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: isSelected ? 18.w : 14.w,
-                height: isSelected ? 18.w : 14.w,
+                width: isConnected ? 18.w : 14.w,
+                height: isConnected ? 18.w : 14.w,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: isConnected
-                      ? Colors.green
-                      : isSelected
-                          ? const Color(0xFFDC2626)
-                          : const Color(0xFF06B6D4),
+                  color: isConnected ? Colors.green : dotColor(),
                   boxShadow: [
                     BoxShadow(
-                      color: (isConnected
-                              ? Colors.green
-                              : const Color(0xFF06B6D4))
-                          .withOpacity(0.5),
+                      color: dotColor().withOpacity(0.5),
                       blurRadius: 6,
                       spreadRadius: 1,
                     ),
@@ -576,7 +534,7 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
               ),
               SizedBox(height: 3.h),
               Text(
-                peer.endpointName.split(' ').first, // first name only
+                peer.displayName.split(' ').first,
                 style: TextStyle(
                   fontSize: 8.sp,
                   color: Colors.grey[700],
@@ -591,57 +549,136 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
     return dots;
   }
 
-  Widget _buildScanButton() {
+  Widget _buildAutoRelayStatusCard(bool isActive, String statusMessage) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(14.w),
+      decoration: BoxDecoration(
+        color: isActive
+            ? const Color(0xFFDC2626).withOpacity(0.07)
+            : Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12.r),
+        border: Border.all(
+          color: isActive
+              ? const Color(0xFFDC2626).withOpacity(0.3)
+              : Colors.grey.shade200,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isActive ? Icons.radar : Icons.radar_outlined,
+                color: isActive ? const Color(0xFFDC2626) : Colors.grey,
+                size: 22.sp,
+              ),
+              SizedBox(width: 10.w),
+              Expanded(
+                child: Text(
+                  isActive ? 'Auto-Relay Active' : 'Auto-Relay Standby',
+                  style: TextStyle(
+                    fontSize: 14.sp,
+                    fontWeight: FontWeight.bold,
+                    color: isActive
+                        ? const Color(0xFFDC2626)
+                        : Colors.grey[700],
+                  ),
+                ),
+              ),
+              if (isActive)
+                SizedBox(
+                  width: 14.w,
+                  height: 14.h,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.w,
+                    color: const Color(0xFFDC2626),
+                  ),
+                ),
+            ],
+          ),
+          SizedBox(height: 6.h),
+          Text(
+            statusMessage,
+            style: TextStyle(fontSize: 12.sp, color: Colors.grey[600]),
+          ),
+          if (isActive) ...[
+            SizedBox(height: 12.h),
+            SizedBox(
+              width: double.infinity,
+              height: 36.h,
+              child: ElevatedButton.icon(
+                onPressed: () => _controller.stop(),
+                icon: Icon(Icons.stop, size: 16.sp, color: Colors.white),
+                label: Text(
+                  'Stop Auto-Relay',
+                  style: TextStyle(fontSize: 13.sp, color: Colors.white),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.grey[700],
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8.r),
+                  ),
+                  elevation: 0,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildManualScanButton(bool isActive) {
     return SizedBox(
       width: double.infinity,
-      height: 48.h,
-      child: ElevatedButton.icon(
-        onPressed: _isScanning ? _stopScan : _startScan,
+      height: 44.h,
+      child: OutlinedButton.icon(
+        onPressed: isActive ? null : _triggerManualRelay,
         icon: Icon(
-          _isScanning ? Icons.stop : Icons.radar,
-          size: 20.sp,
-          color: Colors.white,
+          Icons.radar,
+          size: 18.sp,
+          color: isActive ? Colors.grey : const Color(0xFFDC2626),
         ),
         label: Text(
-          _isScanning ? 'Stop Scanning' : 'Scan for Nearby Devices',
+          'Manual Relay Trigger',
           style: TextStyle(
-            fontSize: 14.sp,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
+            fontSize: 13.sp,
+            color: isActive ? Colors.grey : const Color(0xFFDC2626),
           ),
         ),
-        style: ElevatedButton.styleFrom(
-          backgroundColor:
-              _isScanning ? Colors.grey[700] : const Color(0xFFDC2626),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(
+            color: isActive
+                ? Colors.grey.shade300
+                : const Color(0xFFDC2626).withOpacity(0.5),
+          ),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12.r),
           ),
-          elevation: 0,
         ),
       ),
     );
   }
 
-  Widget _buildPeerList() {
+  Widget _buildPeerList(bool isActive) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            Icon(Icons.devices_other,
-                size: 16.sp, color: Colors.grey[600]),
+            Icon(Icons.devices_other, size: 16.sp, color: Colors.grey[600]),
             SizedBox(width: 6.w),
             Text(
-              _isScanning
-                  ? 'Searching for nearby devices…'
-                  : 'Nearby Devices',
+              isActive ? 'Searching for nearby devices…' : 'Nearby Devices',
               style: TextStyle(
                 fontSize: 13.sp,
                 fontWeight: FontWeight.w600,
                 color: Colors.grey[700],
               ),
             ),
-            if (_isScanning) ...[
+            if (isActive) ...[
               SizedBox(width: 10.w),
               SizedBox(
                 width: 12.w,
@@ -688,134 +725,152 @@ class _P2PRelayScreenState extends State<P2PRelayScreen>
   }
 
   Widget _buildPeerTile(PeerDevice peer) {
-    final isSelected = peer.endpointId == _selectedEndpointId;
     final isConnecting = peer.state == PeerState.connecting;
     final isConnected = peer.state == PeerState.connected;
-    final isSending = _transfer.state == TransferState.sending &&
-        peer.endpointId == _selectedEndpointId;
-    final isDone = _transfer.state == TransferState.done &&
-        peer.endpointId == _selectedEndpointId;
+    final isSending = _transfer.state == TransferState.sending && isConnected;
 
     Color stateColor() {
-      if (isConnected || isDone) return Colors.green;
+      if (isConnected) return Colors.green;
       if (isConnecting || isSending) return const Color(0xFFF59E0B);
       return const Color(0xFF06B6D4);
     }
 
     String stateLabel() {
-      if (isDone) return 'Sent';
       if (isSending) return 'Sending…';
       if (isConnecting) return 'Connecting…';
       if (isConnected) return 'Connected';
-      return 'Tap to send';
+      return 'Discovered';
     }
 
     IconData stateIcon() {
-      if (isDone) return Icons.check_circle;
       if (isSending || isConnecting) return Icons.sync;
       if (isConnected) return Icons.bluetooth_connected;
-      return Icons.send;
+      return Icons.bluetooth;
     }
 
-    return GestureDetector(
-      onTap: (isConnecting || isSending || isDone)
-          ? null
-          : () => _sendToPeer(peer.endpointId),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        margin: EdgeInsets.only(bottom: 10.h),
-        padding: EdgeInsets.all(14.w),
+    Widget _connectivityBadge() {
+      Color badgeColor;
+      String badgeLabel;
+      switch (peer.connectivity) {
+        case ConnectivitySuffix.online:
+          badgeColor = Colors.green;
+          badgeLabel = 'ONLINE';
+          break;
+        case ConnectivitySuffix.local:
+          badgeColor = const Color(0xFF3B82F6);
+          badgeLabel = 'LOCAL';
+          break;
+        case ConnectivitySuffix.offline:
+          badgeColor = const Color(0xFFF97316);
+          badgeLabel = 'OFFLINE';
+          break;
+      }
+      return Container(
+        padding: EdgeInsets.symmetric(horizontal: 6.w, vertical: 2.h),
         decoration: BoxDecoration(
-          color: isSelected
-              ? stateColor().withOpacity(0.07)
-              : Colors.white,
-          borderRadius: BorderRadius.circular(12.r),
-          border: Border.all(
-            color: isSelected
-                ? stateColor().withOpacity(0.4)
-                : Colors.grey.shade200,
-            width: isSelected ? 1.5.w : 1.w,
+          color: badgeColor.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(4.r),
+          border: Border.all(color: badgeColor.withOpacity(0.4)),
+        ),
+        child: Text(
+          badgeLabel,
+          style: TextStyle(
+            fontSize: 9.sp,
+            fontWeight: FontWeight.bold,
+            color: badgeColor,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.03),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
         ),
-        child: Row(
-          children: [
-            // Avatar
-            Container(
-              width: 44.w,
-              height: 44.h,
-              decoration: BoxDecoration(
-                color: stateColor().withOpacity(0.12),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.person_outline,
-                color: stateColor(),
-                size: 22.sp,
-              ),
+      );
+    }
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      margin: EdgeInsets.only(bottom: 10.h),
+      padding: EdgeInsets.all(14.w),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12.r),
+        border: Border.all(color: Colors.grey.shade200),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44.w,
+            height: 44.h,
+            decoration: BoxDecoration(
+              color: stateColor().withOpacity(0.12),
+              shape: BoxShape.circle,
             ),
-            SizedBox(width: 12.w),
-            // Name + status
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    peer.endpointName,
-                    style: TextStyle(
-                      fontSize: 14.sp,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  SizedBox(height: 3.h),
-                  Row(
-                    children: [
-                      Container(
-                        width: 7.w,
-                        height: 7.h,
-                        decoration: BoxDecoration(
-                          color: stateColor(),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      SizedBox(width: 5.w),
-                      Text(
-                        stateLabel(),
+            child: Icon(
+              Icons.person_outline,
+              color: stateColor(),
+              size: 22.sp,
+            ),
+          ),
+          SizedBox(width: 12.w),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        peer.displayName,
                         style: TextStyle(
-                          fontSize: 11.sp,
-                          color: stateColor(),
-                          fontWeight: FontWeight.w500,
+                          fontSize: 14.sp,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            // Action icon
-            if (isConnecting || isSending)
-              SizedBox(
-                width: 20.w,
-                height: 20.h,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.w,
-                  color: stateColor(),
+                    ),
+                    SizedBox(width: 6.w),
+                    _connectivityBadge(),
+                  ],
                 ),
-              )
-            else
-              Icon(
-                stateIcon(),
+                SizedBox(height: 3.h),
+                Row(
+                  children: [
+                    Container(
+                      width: 7.w,
+                      height: 7.h,
+                      decoration: BoxDecoration(
+                        color: stateColor(),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    SizedBox(width: 5.w),
+                    Text(
+                      stateLabel(),
+                      style: TextStyle(
+                        fontSize: 11.sp,
+                        color: stateColor(),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (isConnecting || isSending)
+            SizedBox(
+              width: 20.w,
+              height: 20.h,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.w,
                 color: stateColor(),
-                size: 22.sp,
               ),
-          ],
-        ),
+            )
+          else
+            Icon(stateIcon(), color: stateColor(), size: 22.sp),
+        ],
       ),
     );
   }

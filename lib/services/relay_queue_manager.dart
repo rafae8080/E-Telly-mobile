@@ -266,6 +266,12 @@ class RelayQueueManager {
   /// Whether there is anything that needs uploading right now.
   static bool get hasPending => pendingCount > 0;
 
+  /// Reports eligible for P2P relay (under the hop limit).
+  static List<RelayEntry> getPendingEligibleForRelay({int maxHops = 3}) =>
+      getPending().where((e) => e.hopCount < maxHops).toList();
+
+  static bool get hasRelayableReports => getPendingEligibleForRelay().isNotEmpty;
+
   // ── Maintenance ────────────────────────────────────────────────────────────
 
   /// Removes all uploaded entries older than [olderThan] to keep Hive lean.

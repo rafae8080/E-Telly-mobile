@@ -23,6 +23,7 @@ import 'screens/my_requests_screen.dart';
 import 'screens/my_pledges_screen.dart';
 import 'services/relay_queue_manager.dart';
 import 'services/internet_checker_service.dart';
+import 'services/p2p_relay_service.dart';
 import 'services/notification_service.dart';
 import 'services/navigation_service.dart';
 import 'firebase_options.dart';
@@ -52,6 +53,7 @@ void main() async {
   await HiveService.init();
   await OfflineReportStorage.init();
   await RelayQueueManager.init();
+  await P2PRelayService.instance.init();
 
   InternetCheckerService.instance.start();
 
