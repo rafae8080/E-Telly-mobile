@@ -49,7 +49,10 @@ void main() async {
   await Hive.openBox('settings');
   await Hive.openBox('user_session');
   await Hive.openBox('cached_alerts');
-  
+  await Hive.openBox('cached_evacuation_centers');
+  await Hive.openBox('cached_evacuation_routes');
+  await Hive.openBox('cached_community_reports');
+
   await HiveService.init();
   await OfflineReportStorage.init();
   await RelayQueueManager.init();

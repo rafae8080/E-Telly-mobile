@@ -46,6 +46,9 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="etelly_alerts" />
+        <meta-data
+            android:name="MAPBOX_ACCESS_TOKEN"
+            android:value="pk.eyJ1Ijoia3Jpc3RpbmUxIiwiYSI6ImNtcGFzdXAzMDA3MjcycXNtYjVjcWZ1dnoifQ.I3GOytFFFipEVe8LY72Rmw" />
     </application>
     
     <queries>

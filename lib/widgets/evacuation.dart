@@ -245,6 +245,9 @@ class EvacuationCenterCard extends StatelessWidget {
   final IconData statusIcon;
   final VoidCallback onDirections;
   final VoidCallback onCall;
+  final String hazardSeverityLevel;
+  final bool wasRerouted;
+  final String? hazardLabel;
 
   const EvacuationCenterCard({
     super.key,
@@ -253,7 +256,11 @@ class EvacuationCenterCard extends StatelessWidget {
     required this.statusText,
     required this.statusIcon,
     required this.onDirections,
-    required this.onCall, required bool isRecommended,
+    required this.onCall,
+    required bool isRecommended,
+    this.hazardSeverityLevel = 'none',
+    this.wasRerouted = false,
+    this.hazardLabel,
   });
 
   @override
@@ -360,6 +367,27 @@ class EvacuationCenterCard extends StatelessWidget {
               ),
             ),
           ),
+          if (hazardSeverityLevel != 'none') ...[
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: _badgeColor(hazardSeverityLevel),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.warning_amber_rounded, size: 10, color: Colors.white),
+                const SizedBox(width: 3),
+                Text(
+                  wasRerouted
+                      ? 'Rerouted • ${hazardLabel ?? "Hazard"}'
+                      : '${_badgeLabel(hazardSeverityLevel)} • ${hazardLabel ?? "Hazard"}',
+                  style: const TextStyle(
+                      fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600),
+                ),
+              ]),
+            ),
+          ],
           const SizedBox(height: 16),
           Wrap(
             spacing: 6,
@@ -497,5 +525,23 @@ class EvacuationCenterCard extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  Color _badgeColor(String s) {
+    switch (s) {
+      case 'critical': return const Color(0xFFDC2626);
+      case 'high':     return const Color(0xFFF59E0B);
+      case 'moderate': return const Color(0xFFEAB308);
+      default:         return Colors.transparent;
+    }
+  }
+
+  String _badgeLabel(String s) {
+    switch (s) {
+      case 'critical': return 'Critical';
+      case 'high':     return 'Warning';
+      case 'moderate': return 'Watch';
+      default:         return '';
+    }
   }
 }

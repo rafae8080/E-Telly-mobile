@@ -55,4 +55,7 @@ android/build/
 # Backend handoff docs (local reference only)
 MOBILE_FCM_GUIDE.md
 OFFLINE_IMPLEMENTATION.md
-P2P_MESH_REDESIGN.md
+
+# Vendored Mapbox plugin's demo app — not used by this app, contains upstream
+# example tokens that trip GitHub secret scanning. Keep the plugin, drop its example.
+packages/flutter_mapbox_navigation/example/

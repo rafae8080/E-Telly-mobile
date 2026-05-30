@@ -1,13 +1,21 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'dart:math';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_mapbox_navigation/flutter_mapbox_navigation.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
+import '../services/hive_service.dart';
+import '../services/api_service.dart';
 import '../services/alert_service.dart';
-import '../dbhelper/mongodb.dart';
+import '../services/hazard_routing_service.dart';
+import '../services/notification_service.dart';
 
 
 class EvacuationCenter {
@@ -25,6 +33,8 @@ class EvacuationCenter {
   final String operatingHours;
   bool isHazardAffected;
   String? hazardType;
+  String hazardSeverityLevel;
+  bool wasRerouted;
 
   EvacuationCenter({
     required this.id,
@@ -41,6 +51,8 @@ class EvacuationCenter {
     required this.operatingHours,
     this.isHazardAffected = false,
     this.hazardType,
+    this.hazardSeverityLevel = 'none',
+    this.wasRerouted = false,
   });
 
   LatLng get latLng => LatLng(latitude, longitude);
@@ -80,7 +92,9 @@ class EvacuationCenter {
     double lat = 14.5865;
     double lng = 121.1756;
     if (json['latitude'] != null) lat = (json['latitude'] as num).toDouble();
+    else if (json['lat'] != null) lat = (json['lat'] as num).toDouble();
     if (json['longitude'] != null) lng = (json['longitude'] as num).toDouble();
+    else if (json['lng'] != null) lng = (json['lng'] as num).toDouble();
 
     List<String> facilitiesList = [];
     if (json['facilities'] != null && json['facilities'] is List) {
@@ -139,6 +153,21 @@ class HazardZone {
   });
 }
 
+// A single Mapbox route alternative tagged with the hazards that fall on it.
+class _RouteOption {
+  final List<LatLng> geometry;
+  final List<HazardPoint> criticals;
+  final List<HazardPoint> warnings;
+  _RouteOption({
+    required this.geometry,
+    required this.criticals,
+    required this.warnings,
+  });
+}
+
+// User's decision when a warning/watch hazard sits on the chosen route.
+enum _RouteChoice { cancel, alternative, continueRoute }
+
 // ─────────────────────────────────────────────
 // SCREEN
 // ─────────────────────────────────────────────
@@ -164,18 +193,35 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
 
   // Hazards
   List<HazardZone> _hazardZones = [];
-  bool _isLoadingHazards = true;
   bool _isLoadingCenters = true;
 
   // Mapbox Navigation
   MapBoxNavigation? _mapboxNavigation;
-  MapBoxOptions? _mapboxOptions;
   bool _isNavigating = false;
   bool _isCalculatingRoute = false;
   EvacuationCenter? _destinationCenter;
 
   // Location stream
   StreamSubscription<Position>? _positionSubscription;
+
+  // Hazard routing
+  List<HazardPoint> _hazardPoints = [];
+  List<HazardPoint> _routeHazardWarnings = [];
+
+  // Offline state
+  bool _isOfflineMode = false;
+  bool _isCompassMode = false;
+  List<LatLng> _offlineRouteGeometry = [];
+  List<LatLng> _lastRouteGeometry = [];
+
+  // UI banners
+  bool _showHazardWarningBanner = false;
+
+  // Live updates (socket.io)
+  IO.Socket? _socket;
+  Timer? _liveHazardDebounce;
+  Timer? _liveCenterDebounce;
+  final Set<String> _notifiedHazardIds = {};
 
   final LatLng _antipoloCenter = const LatLng(14.5865, 121.1756);
 
@@ -189,43 +235,104 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     _loadEvacuationCenters();
     _loadHazardZones();
     _startLocationUpdates();
+    _initLiveUpdates();
   }
 
   @override
   void dispose() {
     _positionSubscription?.cancel();
+    _liveHazardDebounce?.cancel();
+    _liveCenterDebounce?.cancel();
+    _socket?.dispose();
     _mapController.dispose();
     _mapboxNavigation?.finishNavigation();
     super.dispose();
   }
 
+  // ── Live updates (socket.io) ───────────────
+
+  void _initLiveUpdates() {
+    try {
+      _socket = IO.io(
+        ApiService.baseUrl,
+        IO.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),
+      );
+      _socket!.connect();
+      // Hazard-affecting events → refresh alerts + approved reports.
+      for (final e in const [
+        'new_alert', 'alert_updated', 'report_status_updated', 'report_updated',
+      ]) {
+        _socket!.on(e, (_) { if (mounted) _scheduleHazardRefresh(); });
+      }
+      // Center-affecting events → refresh evacuation centers.
+      for (final e in const ['evacuation_updated', 'evacuation_center_created']) {
+        _socket!.on(e, (_) { if (mounted) _scheduleCenterRefresh(); });
+      }
+    } catch (e) {
+      print('[Evacuation] live updates init failed: $e');
+    }
+  }
+
+  // A single admin action can emit several events at once — coalesce them so we
+  // reload once rather than hammering the network.
+  void _scheduleHazardRefresh() {
+    _liveHazardDebounce?.cancel();
+    _liveHazardDebounce = Timer(const Duration(milliseconds: 800), _refreshHazardsLive);
+  }
+
+  void _scheduleCenterRefresh() {
+    _liveCenterDebounce?.cancel();
+    _liveCenterDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) _loadEvacuationCenters();
+    });
+  }
+
+  Future<void> _refreshHazardsLive() async {
+    if (!mounted) return;
+    await _loadHazardZones();
+    if (!mounted) return;
+
+    // While navigating, warn (notification only) if a NEW critical hazard now sits
+    // on the active route. No forced reroute — the user re-checks when ready.
+    if (_isNavigating && _lastRouteGeometry.isNotEmpty) {
+      final criticals = _hazardPoints.where((h) => h.isCritical).toList();
+      final onRoute = HazardAwareRoutingService.hazardsWithin(
+          _lastRouteGeometry, criticals, HazardAwareRoutingService.blockRadius);
+      final fresh = onRoute.where((h) => !_notifiedHazardIds.contains(h.id)).toList();
+      if (fresh.isNotEmpty) {
+        _notifiedHazardIds.addAll(fresh.map((h) => h.id));
+        final h = fresh.first;
+        await NotificationService.showLocalAlert(
+          'New hazard on your route',
+          '${h.label} reported on your way — re-check your route.',
+        );
+      }
+    }
+  }
+
   // ── Mapbox Navigation Init ─────────────────
 
   void _initMapboxNavigation() {
-    // FIX: Use the no-arg constructor then register the listener separately.
-    // Some versions expose a singleton via MapBoxNavigation.instance — if the
-    // line below still fails, replace it with:
-    //   _mapboxNavigation = MapBoxNavigation.instance;
     _mapboxNavigation = MapBoxNavigation();
     _mapboxNavigation!.registerRouteEventListener(_onRouteEvent);
-
-    _mapboxOptions = MapBoxOptions(
-      initialLatitude: _currentLocation?.latitude ?? 14.5865,
-      initialLongitude: _currentLocation?.longitude ?? 121.1756,
-      zoom: 15.0,
-      tilt: 0.0,
-      bearing: 0.0,
-      enableRefresh: true,
-      alternatives: true,
-      voiceInstructionsEnabled: true,
-      bannerInstructionsEnabled: true,
-      mode: MapBoxNavigationMode.walking,
-      isOptimized: true,
-      units: VoiceUnits.metric,
-      simulateRoute: false,
-      language: "en",
-    );
   }
+
+  MapBoxOptions _buildMapboxOptions() => MapBoxOptions(
+    initialLatitude: _currentLocation?.latitude ?? 14.5865,
+    initialLongitude: _currentLocation?.longitude ?? 121.1756,
+    zoom: 15.0,
+    tilt: 0.0,
+    bearing: 0.0,
+    enableRefresh: true,
+    alternatives: false,
+    voiceInstructionsEnabled: true,
+    bannerInstructionsEnabled: true,
+    mode: MapBoxNavigationMode.walking,
+    isOptimized: false,
+    units: VoiceUnits.metric,
+    simulateRoute: false,
+    language: "en",
+  );
 
   Future<void> _onRouteEvent(e) async {
     switch (e.eventType) {
@@ -259,6 +366,18 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
 
       default:
         break;
+    }
+  }
+
+  // ── Connectivity ───────────────────────────
+
+  Future<bool> _hasConnectivity() async {
+    try {
+      final result = await InternetAddress.lookup('google.com')
+          .timeout(const Duration(seconds: 4));
+      return result.isNotEmpty && result.first.rawAddress.isNotEmpty;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -379,8 +498,92 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
 
   void _updateDistances() {
     if (_currentLocation == null) return;
+    final updated = _allCenters.map((center) {
+      final distance = _calculateDistance(_currentLocation!, center.latLng);
+      final distanceStr = distance < 1
+          ? '${(distance * 1000).toInt()} m'
+          : '${distance.toStringAsFixed(1)} km';
+      return EvacuationCenter(
+        id: center.id,
+        name: center.name,
+        address: center.address,
+        capacity: center.capacity,
+        currentOccupancy: center.currentOccupancy,
+        status: center.status,
+        contact: center.contact,
+        latitude: center.latitude,
+        longitude: center.longitude,
+        distance: distanceStr,
+        facilities: center.facilities,
+        operatingHours: center.operatingHours,
+        isHazardAffected: center.isHazardAffected,
+        hazardType: center.hazardType,
+        hazardSeverityLevel: center.hazardSeverityLevel,
+        wasRerouted: center.wasRerouted,
+      );
+    }).toList();
+
+    updated.sort((a, b) {
+      final distA = _parseDistanceToMeters(a.distance);
+      final distB = _parseDistanceToMeters(b.distance);
+      return distA.compareTo(distB);
+    });
+
     setState(() {
-      _evacuationCenters = _allCenters.map((center) {
+      _allCenters = updated;
+      _evacuationCenters = updated;
+    });
+  }
+
+  // ── Data loading ───────────────────────────
+
+  Future<void> _loadEvacuationCenters() async {
+    if (!mounted) return;
+    setState(() => _isLoadingCenters = true);
+
+    if (await _hasConnectivity()) {
+      try {
+        final response = await ApiService()
+            .authenticatedGet('/api/evacuation/centers?barangay=all');
+        if (response.statusCode == 200) {
+          final body = jsonDecode(response.body);
+          final List<dynamic> raw = body is List
+              ? body
+              : (body['centers'] ?? body['data'] ?? []);
+          final data = raw
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+          await HiveService.cacheEvacuationCenters(data);
+          _processCenters(data);
+        } else {
+          print('❌ Evacuation centers API ${response.statusCode}');
+          await _loadCentersFromCache(markOffline: false);
+        }
+      } catch (e) {
+        print('❌ Error loading evacuation centers: $e');
+        await _loadCentersFromCache(markOffline: false);
+      }
+    } else {
+      await _loadCentersFromCache(markOffline: true);
+    }
+  }
+
+  Future<void> _loadCentersFromCache({bool markOffline = true}) async {
+    final cached = await HiveService.getCachedEvacuationCenters();
+    if (cached.isEmpty) {
+      if (mounted) setState(() => _isLoadingCenters = false);
+      return;
+    }
+    if (markOffline && mounted) setState(() => _isOfflineMode = true);
+    _processCenters(cached);
+  }
+
+  void _processCenters(List<Map<String, dynamic>> data) {
+    final centers = data.map((d) => EvacuationCenter.fromJson(d)).toList();
+
+    List<EvacuationCenter> result = centers;
+    if (_currentLocation != null) {
+      result = centers.map((center) {
         final distance = _calculateDistance(_currentLocation!, center.latLng);
         final distanceStr = distance < 1
             ? '${(distance * 1000).toInt()} m'
@@ -401,132 +604,353 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
         );
       }).toList();
 
-      _evacuationCenters.sort((a, b) {
+      result.sort((a, b) {
         final distA = _parseDistanceToMeters(a.distance);
         final distB = _parseDistanceToMeters(b.distance);
         return distA.compareTo(distB);
       });
-    });
-  }
+    }
 
-  // ── Data loading ───────────────────────────
+    final annotated = _hazardPoints.isNotEmpty
+        ? HazardAwareRoutingService.annotateCentersWithHazards(result, _hazardPoints)
+        : result;
 
-  Future<void> _loadEvacuationCenters() async {
-    if (!mounted) return;
-    setState(() => _isLoadingCenters = true);
-
-    try {
-      if (!MongoDatabase.isConnected) await MongoDatabase.connect();
-
-      final centersData = await MongoDatabase.getAllEvacuationCenters();
-      final centers =
-          centersData.map((data) => EvacuationCenter.fromJson(data)).toList();
-
-      List<EvacuationCenter> result = centers;
-
-      if (_currentLocation != null) {
-        result = centers.map((center) {
-          final distance =
-              _calculateDistance(_currentLocation!, center.latLng);
-          final distanceStr = distance < 1
-              ? '${(distance * 1000).toInt()} m'
-              : '${distance.toStringAsFixed(1)} km';
-          return EvacuationCenter(
-            id: center.id,
-            name: center.name,
-            address: center.address,
-            capacity: center.capacity,
-            currentOccupancy: center.currentOccupancy,
-            status: center.status,
-            contact: center.contact,
-            latitude: center.latitude,
-            longitude: center.longitude,
-            distance: distanceStr,
-            facilities: center.facilities,
-            operatingHours: center.operatingHours,
-          );
-        }).toList();
-
-        result.sort((a, b) {
-          final distA = _parseDistanceToMeters(a.distance);
-          final distB = _parseDistanceToMeters(b.distance);
-          return distA.compareTo(distB);
-        });
-      }
-
-      if (mounted) {
-        setState(() {
-          _allCenters = result;
-          _evacuationCenters = result;
-          _isLoadingCenters = false;
-        });
-      }
-    } catch (e) {
-      print('❌ Error loading evacuation centers: $e');
-      if (mounted) {
-        setState(() => _isLoadingCenters = false);
-        _showErrorDialog('Failed to load evacuation centers: $e');
-      }
+    if (mounted) {
+      setState(() {
+        _allCenters = annotated;
+        _evacuationCenters = annotated;
+        _isLoadingCenters = false;
+      });
     }
   }
 
   Future<void> _loadHazardZones() async {
     if (!mounted) return;
-    setState(() => _isLoadingHazards = true);
 
-    try {
-      if (!MongoDatabase.isConnected) await MongoDatabase.connect();
-
-      final alerts = await MongoDatabase.getActiveAlerts();
-      final List<HazardZone> hazards = [];
-
-      for (var alert in alerts) {
-        if (alert['severity'] == 'critical' || alert['severity'] == 'warning') {
-          final barangays = List<String>.from(alert['barangays'] ?? []);
-          if (barangays.isNotEmpty) {
-            hazards.add(HazardZone(
-              type: alert['type'] ?? 'hazard',
-              severity: alert['severity'] ?? 'warning',
-              barangays: barangays,
-              center: _getBarangayCenter(barangays[0]),
-              radius: 1.5,
-              createdAt: DateTime.parse(
-                  alert['createdAt'] ?? DateTime.now().toIso8601String()),
-            ));
-          }
-        }
+    if (await _hasConnectivity()) {
+      try {
+        // AlertService calls /api/alerts, caches to Hive, falls back on failure
+        final alerts  = await AlertService().fetchAlerts();
+        final reports = await _fetchApprovedReports();
+        await HiveService.cacheCommunityReports(reports);
+        await _buildHazardState(alerts, reports);
+      } catch (e) {
+        print('Error loading hazards: $e');
+        await _loadHazardZonesFromCache(markOffline: false);
       }
-
-      if (mounted) {
-        setState(() {
-          _hazardZones = hazards;
-          _isLoadingHazards = false;
-        });
-      }
-    } catch (e) {
-      print('Error loading hazards: $e');
-      if (mounted) setState(() => _isLoadingHazards = false);
+    } else {
+      await _loadHazardZonesFromCache(markOffline: true);
     }
   }
 
-  LatLng _getBarangayCenter(String barangay) {
-    final Map<String, LatLng> barangayCoordinates = {
-      'San Roque': const LatLng(14.5865, 121.1756),
-      'Mambugan': const LatLng(14.6058, 121.1523),
-      'Mayamot': const LatLng(14.6154, 121.1589),
-      'San Jose': const LatLng(14.5982, 121.1645),
-      'Cupang': const LatLng(14.5721, 121.1654),
-      'Dela Paz': const LatLng(14.5698, 121.1723),
-      'muntindilaw': const LatLng(14.5900, 121.1700),
-    };
-    final key = barangay.toLowerCase();
-    return barangayCoordinates.entries
-        .firstWhere(
-          (e) => e.key.toLowerCase() == key,
-          orElse: () => MapEntry('default', _antipoloCenter),
-        )
-        .value;
+  Future<void> _loadHazardZonesFromCache({bool markOffline = true}) async {
+    if (markOffline && mounted) setState(() => _isOfflineMode = true);
+    final cachedAlerts  = await HiveService.getCachedAlerts();
+    final cachedReports = await HiveService.getCachedCommunityReports();
+    await _buildHazardState(cachedAlerts, cachedReports);
   }
+
+  Future<void> _buildHazardState(
+      List<Map<String, dynamic>> alerts,
+      List<Map<String, dynamic>> reports) async {
+    final zones = <HazardZone>[];
+
+    for (final a in alerts) {
+      final severity = a['severity'] as String? ?? 'watch';
+      // Show circles for all active hazard severities — severity only controls radius size
+
+      final barangayName = a['barangay'] as String?
+          ?? (a['barangays'] is List && (a['barangays'] as List).isNotEmpty
+              ? (a['barangays'] as List).first.toString()
+              : '');
+      final center = HazardAwareRoutingService.extractLatLng(a)
+          ?? _getBarangayCenter(barangayName.split(',').first.trim());
+      final type = a['alertType'] as String? ?? a['type'] as String? ?? 'hazard';
+      final barangayLabel = a['barangay'] as String?
+          ?? (a['barangays'] is List ? (a['barangays'] as List).join(', ') : '');
+
+      // Scale radius by severity so watch/warning circles are proportionally smaller.
+      // AlertService maps raw 'warning' → 'high', so accept both spellings.
+      final baseRadius = HazardAwareRoutingService.criticalRadiusFor(type);
+      final radiusM = (severity == 'critical' || severity == 'evacuate')
+          ? baseRadius
+          : (severity == 'warning' || severity == 'high')
+              ? baseRadius * 0.6
+              : baseRadius * 0.3; // moderate / watch
+
+      zones.add(HazardZone(
+        type:      type,
+        severity:  severity,
+        barangays: [barangayLabel],
+        center:    center,
+        radius:    radiusM / 1000.0,
+        createdAt: DateTime.tryParse(a['createdAt'] as String? ?? '') ?? DateTime.now(),
+      ));
+    }
+
+    // Only show community reports from the last 7 days to prevent stale data accumulating
+    final sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7));
+    for (final r in reports) {
+      final createdAt = DateTime.tryParse(r['createdAt'] as String? ?? '');
+      if (createdAt != null && createdAt.isBefore(sevenDaysAgo)) continue;
+
+      final center = HazardAwareRoutingService.extractLatLng(r);
+      if (center == null) continue;
+      final type = r['emergencyType'] as String? ?? r['type'] as String? ?? 'other';
+      final reportSeverity = r['severity'] == 'High' ? 'critical' : 'warning';
+      final baseRadius = HazardAwareRoutingService.criticalRadiusFor(type);
+      final loc = r['location'];
+      zones.add(HazardZone(
+        type:      type,
+        severity:  reportSeverity,
+        barangays: [(loc is Map ? loc['barangay'] as String? : null) ?? ''],
+        center:    center,
+        radius:    baseRadius * (reportSeverity == 'critical' ? 0.6 : 0.4) / 1000.0,
+        createdAt: createdAt ?? DateTime.now(),
+      ));
+    }
+
+    final hazardPoints = await HazardAwareRoutingService.loadAllHazardPoints();
+
+    if (!mounted) return;
+    setState(() {
+      _hazardZones  = zones;
+      _hazardPoints = hazardPoints;
+    });
+
+    if (_allCenters.isNotEmpty) {
+      final annotated = HazardAwareRoutingService
+          .annotateCentersWithHazards(_allCenters, _hazardPoints);
+      setState(() { _evacuationCenters = annotated; _allCenters = annotated; });
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchApprovedReports() async {
+    try {
+      final response = await ApiService().authenticatedGet('/api/reports/approved');
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body);
+        final List<dynamic> raw = body is List ? body : (body['reports'] ?? []);
+        return List<Map<String, dynamic>>.from(
+            raw.where((r) => r['severity'] == 'High' || r['severity'] == 'Medium'));
+      }
+    } catch (e) {
+      print('[Evacuation] Failed to fetch approved reports: $e');
+    }
+    return [];
+  }
+
+  LatLng _getBarangayCenter(String barangay) {
+    const coords = {
+      'san roque':    LatLng(14.5832, 121.1719),
+      'mambugan':     LatLng(14.6206, 121.1416),
+      'mayamot':      LatLng(14.6247, 121.1233),
+      'san jose':     LatLng(14.6236, 121.2598),
+      'cupang':       LatLng(14.6360, 121.1239),
+      'dela paz':     LatLng(14.5901, 121.1703),
+      'muntindilaw':  LatLng(14.5989, 121.1301),
+      'bagong nayon': LatLng(14.6261, 121.1687),
+      'beverly hills':LatLng(14.5843, 121.1582),
+      'calawis':      LatLng(14.6731, 121.2423),
+      'dalig':        LatLng(14.5763, 121.1820),
+      'inarawan':     LatLng(14.6248, 121.1950),
+      'san isidro':   LatLng(14.5916, 121.1838),
+      'san juan':     LatLng(14.6278, 121.1770),
+      'san luis':     LatLng(14.6043, 121.1981),
+      'santa cruz':   LatLng(14.6157, 121.1694),
+    };
+    return coords[barangay.toLowerCase()] ?? _antipoloCenter;
+  }
+
+  // ── Mapbox Directions helpers ──────────────
+
+  // Fetches all Mapbox walking route alternatives between two points.
+  // Returns empty list on any failure — callers fall back to straight-line check.
+  Future<List<List<LatLng>>> _fetchMapboxAlternatives(
+      LatLng origin, LatLng dest) async {
+    try {
+      final token = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+      if (token.isEmpty) return [];
+      final coords = '${origin.longitude},${origin.latitude};'
+                     '${dest.longitude},${dest.latitude}';
+      final url = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/walking/$coords'
+        '?alternatives=true&geometries=geojson&access_token=$token',
+      );
+      final res = await http.get(url).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return [];
+      final routes = (jsonDecode(res.body)['routes'] as List?) ?? [];
+      return routes.map<List<LatLng>>((r) =>
+        (r['geometry']['coordinates'] as List)
+            .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+            .toList()
+      ).toList();
+    } catch (e) {
+      print('[Evacuation] Directions API error: $e');
+      return [];
+    }
+  }
+
+  // Fetches a single walking route forced through [via] — used to build a detour
+  // when Mapbox returns no hazard-free alternative. Empty list on any failure.
+  Future<List<LatLng>> _fetchMapboxRouteVia(
+      LatLng origin, LatLng via, LatLng dest) async {
+    try {
+      final token = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+      if (token.isEmpty) return [];
+      final coords = '${origin.longitude},${origin.latitude};'
+                     '${via.longitude},${via.latitude};'
+                     '${dest.longitude},${dest.latitude}';
+      final url = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/walking/$coords'
+        '?alternatives=false&geometries=geojson&access_token=$token',
+      );
+      final res = await http.get(url).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return [];
+      final routes = (jsonDecode(res.body)['routes'] as List?) ?? [];
+      if (routes.isEmpty) return [];
+      return (routes.first['geometry']['coordinates'] as List)
+          .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+          .toList();
+    } catch (e) {
+      print('[Evacuation] Detour Directions API error: $e');
+      return [];
+    }
+  }
+
+  // Attempts to build a route that avoids [avoid] by inserting a perpendicular
+  // detour waypoint clear of the worst hazard. Probes BOTH sides at escalating
+  // offsets so it exhausts real alternatives before giving up. Returns the detour
+  // geometry if it succeeds, else null. When [mustBeClean] the detour must clear
+  // every hazard within warnRadius (warning case); otherwise it only needs to clear
+  // criticals out of blockRadius (the impassable street).
+  Future<List<LatLng>?> _tryForcedDetour(LatLng origin, LatLng dest,
+      List<HazardPoint> avoid, List<HazardPoint> allHazards,
+      {bool mustBeClean = false}) async {
+    if (avoid.isEmpty) return null;
+    final block = HazardAwareRoutingService.blockRadius;
+    final warn  = HazardAwareRoutingService.warnRadius;
+    final criticals = allHazards.where((h) => h.isCritical).toList();
+
+    // Detour around the hazard closest to the straight path.
+    final worst = avoid.reduce((a, b) =>
+        _minDistanceToGeometry(a.location, [origin, dest]) <=
+        _minDistanceToGeometry(b.location, [origin, dest]) ? a : b);
+
+    // Escalating perpendicular offsets — a small nudge usually suffices, a larger
+    // one is the fallback for tight grids.
+    for (final offset in [block + 150, block + 450]) {
+      final candidates = HazardAwareRoutingService.computeDetourWaypoints(
+          worst.location, origin, dest, offsetMeters: offset);
+      for (final via in candidates) {
+        final geom = await _fetchMapboxRouteVia(origin, via, dest);
+        if (geom.isEmpty) continue;
+        final stillBlocked = mustBeClean
+            ? HazardAwareRoutingService.hazardsWithin(geom, allHazards, warn).isNotEmpty
+            : HazardAwareRoutingService.hazardsWithin(geom, criticals, block).isNotEmpty;
+        if (!stillBlocked) return geom;
+      }
+    }
+    return null;
+  }
+
+  // Samples several intermediate via-points evenly along the detour [geometry] so
+  // the Mapbox Navigation SDK is pinned onto the chosen safe corridor. A single
+  // apex point isn't enough — the SDK can still reach it *through* the hazard
+  // street — so we lay down points roughly every fifth of the route (≥150 m
+  // apart, capped at 8). These are passed as SILENT waypoints, so they only shape
+  // the route, not the turn-by-turn stops. This no longer loops because the
+  // navigator now uses the walking profile (the old loop was a walking-geometry/
+  // driving-route mismatch), and waypoint order is preserved (no optimization).
+  List<LatLng> _detourViaPoints(List<LatLng> geometry) {
+    if (geometry.length < 3) return [];
+    double total = 0;
+    for (int i = 1; i < geometry.length; i++) {
+      total += HazardAwareRoutingService.distanceMeters(geometry[i - 1], geometry[i]);
+    }
+    if (total <= 0) return [];
+
+    final interval = max(150.0, total / 6);
+    final pts = <LatLng>[];
+    double acc = 0;
+    for (int i = 1; i < geometry.length - 1; i++) {
+      acc += HazardAwareRoutingService.distanceMeters(geometry[i - 1], geometry[i]);
+      if (acc >= interval) {
+        pts.add(geometry[i]);
+        acc = 0;
+        if (pts.length >= 8) break;
+      }
+    }
+    // Guarantee at least one shaping point for short detours.
+    if (pts.isEmpty) pts.add(geometry[geometry.length ~/ 2]);
+    return pts;
+  }
+
+  // Fetches every Mapbox walking alternative and tags each with the critical /
+  // warning hazards that lie on it. The caller decides what to do per the
+  // hazard-aware policy (auto-reroute around critical, ask the user on warning).
+  Future<List<_RouteOption>> _analyzeRouteOptions(
+      LatLng origin, LatLng dest, List<HazardPoint> hazards) async {
+    final geometries = await _fetchMapboxAlternatives(origin, dest);
+    final criticalHazards = hazards.where((h) => h.isCritical).toList();
+    final options = <_RouteOption>[];
+    for (final g in geometries) {
+      // Blocking = critical hazards on the street itself (block radius).
+      // Warnings = anything else within the wider warn radius.
+      final blocking = HazardAwareRoutingService.hazardsWithin(
+          g, criticalHazards, HazardAwareRoutingService.blockRadius);
+      final near = HazardAwareRoutingService.hazardsWithin(
+          g, hazards, HazardAwareRoutingService.warnRadius);
+      options.add(_RouteOption(
+        geometry:  g,
+        criticals: blocking,
+        warnings:  near.where((h) => !blocking.contains(h)).toList(),
+      ));
+    }
+    return options;
+  }
+
+  // First option with no critical hazard, preferring a fully clean one. null if
+  // every route is blocked by a critical hazard.
+  _RouteOption? _firstNonCritical(List<_RouteOption> options) {
+    _RouteOption? fallback;
+    for (final o in options) {
+      if (o.criticals.isEmpty) {
+        if (o.warnings.isEmpty) return o; // clean — best possible
+        fallback ??= o;
+      }
+    }
+    return fallback;
+  }
+
+  // First fully clean option (no critical, no warning), or null.
+  _RouteOption? _firstClean(Iterable<_RouteOption> options) {
+    for (final o in options) {
+      if (o.criticals.isEmpty && o.warnings.isEmpty) return o;
+    }
+    return null;
+  }
+
+  // Builds the waypoint list for [geometry]. Adds one apex via-point only when a
+  // detour is being forced, so the SDK locks onto the chosen corridor without
+  // looping; the plain origin→dest route is used otherwise.
+  List<WayPoint> _wayPointsFor(
+      LatLng origin, EvacuationCenter center, List<LatLng> geometry,
+      {required bool forceDetour}) {
+    final dest = center.latLng;
+    if (!forceDetour) return [_wp('My Location', origin), _wp(center.name, dest)];
+    return [
+      _wp('My Location', origin),
+      for (final p in _detourViaPoints(geometry)) _wpSilent(p),
+      _wp(center.name, dest),
+    ];
+  }
+
+  WayPoint _wp(String name, LatLng loc) =>
+      WayPoint(name: name, latitude: loc.latitude, longitude: loc.longitude);
+
+  WayPoint _wpSilent(LatLng loc) =>
+      WayPoint(name: 'via', latitude: loc.latitude, longitude: loc.longitude, isSilent: true);
 
   // ── Navigation ─────────────────────────────
 
@@ -539,39 +963,329 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     setState(() {
       _destinationCenter = center;
       _isCalculatingRoute = true;
+      _routeHazardWarnings = [];
+      _showHazardWarningBanner = false;
     });
+    _notifiedHazardIds.clear(); // per-trip: re-arm mid-nav hazard notifications
 
-    // Warn if hazard is near destination
-    final hasNearbyHazard = _hazardZones.any((hazard) =>
-        _calculateDistance(center.latLng, hazard.center) < hazard.radius);
+    if (await _hasConnectivity()) {
+      // Build hazard points from state → Hive cache → displayed zones (in order).
+      // This ensures detection works even if async loading hasn't finished yet.
+      List<HazardPoint> hazardPoints = _hazardPoints.isNotEmpty
+          ? _hazardPoints
+          : await HazardAwareRoutingService.loadAllHazardPoints();
+      if (hazardPoints.isEmpty && _hazardZones.isNotEmpty) {
+        hazardPoints = _hazardZones.map((z) => HazardPoint(
+          id: '${z.center.latitude},${z.center.longitude}',
+          type: z.type,
+          severity: z.severity,
+          source: 'zone',
+          label: '${z.type[0].toUpperCase()}${z.type.substring(1)} ${z.severity}',
+          location: z.center,
+          createdAt: z.createdAt,
+        )).toList();
+      }
 
-    if (hasNearbyHazard) {
-      final proceed = await _showHazardWarningDialog(center.name);
-      if (!proceed) {
-        if (mounted) setState(() => _isCalculatingRoute = false);
-        return;
+      // If the destination itself sits ON a critical hazard (block radius), pick next safe center
+      final destInCritical = hazardPoints.where((h) => h.isCritical).any((h) =>
+          HazardAwareRoutingService.distanceMeters(center.latLng, h.location) <=
+          HazardAwareRoutingService.blockRadius);
+
+      if (destInCritical) {
+        final safe = HazardAwareRoutingService.filterSafeCenters(_allCenters, hazardPoints);
+        if (safe.isNotEmpty && safe.first.id != center.id) {
+          safe.first.wasRerouted = true;
+          if (mounted) setState(() => _isCalculatingRoute = false);
+          _startEvacuation(safe.first);
+          return;
+        }
+        // All centers in critical zone — proceed anyway
+      }
+
+      // Analyze every alternative, then apply the hazard policy:
+      //   • critical/evacuate on route → auto-reroute around it (red dialog only
+      //     if no route avoids it)
+      //   • warning/watch on route     → ask the user: alternative or continue
+      final origin  = _currentLocation!;
+      final options = await _analyzeRouteOptions(origin, center.latLng, hazardPoints);
+
+      List<WayPoint> wayPoints;
+      bool wasRerouted = false;
+
+      if (options.isEmpty) {
+        // Directions API unavailable → straight-line hazard check, plain route.
+        final crits = HazardAwareRoutingService.getHazardsNearStraightLine(
+            origin, center.latLng,
+            hazardPoints.where((h) => h.isCritical).toList(),
+            HazardAwareRoutingService.blockRadius);
+        final near = HazardAwareRoutingService.getHazardsNearStraightLine(
+            origin, center.latLng, hazardPoints,
+            HazardAwareRoutingService.warnRadius);
+        _routeHazardWarnings = near.where((h) => !crits.contains(h)).toList();
+        _lastRouteGeometry = [];
+        if (crits.isNotEmpty) {
+          final proceed = await _showCriticalHazardDialog(crits.first);
+          if (!proceed) {
+            if (mounted) setState(() => _isCalculatingRoute = false);
+            return;
+          }
+        }
+        wayPoints = _wayPointsFor(origin, center, const [], forceDetour: false);
+      } else {
+        final primary = options.first;
+
+        if (primary.criticals.isNotEmpty) {
+          // CRITICAL/EVACUATE → reroute automatically.
+          final alt = _firstNonCritical(options);
+          List<LatLng>? rerouteGeom = alt?.geometry;
+
+          // Mapbox often returns no safe alternative for short walking trips —
+          // try to force a detour around the hazard before giving up.
+          rerouteGeom ??= await _tryForcedDetour(
+              origin, center.latLng, primary.criticals, hazardPoints);
+
+          if (rerouteGeom != null) {
+            _lastRouteGeometry   = rerouteGeom;
+            _routeHazardWarnings = _warningsOnRoute(rerouteGeom, hazardPoints);
+            wasRerouted = true;
+            wayPoints = _wayPointsFor(origin, center, rerouteGeom, forceDetour: true);
+          } else {
+            // No route avoids it → let the user decide.
+            _lastRouteGeometry = primary.geometry;
+            _routeHazardWarnings = [];
+            final proceed = await _showCriticalHazardDialog(primary.criticals.first);
+            if (!proceed) {
+              if (mounted) setState(() => _isCalculatingRoute = false);
+              return;
+            }
+            wayPoints = _wayPointsFor(origin, center, primary.geometry, forceDetour: false);
+          }
+        } else if (primary.warnings.isNotEmpty) {
+          // WARNING/WATCH → offer the user a choice. Prefer a hazard-free Mapbox
+          // alternative; if none, try to force a detour so "Use Alternative" is
+          // still a real option.
+          List<LatLng>? altGeom = _firstClean(options.skip(1))?.geometry;
+          altGeom ??= await _tryForcedDetour(
+              origin, center.latLng, primary.warnings, hazardPoints,
+              mustBeClean: true);
+
+          final choice = await _showHazardOnRouteDialog(
+              primary.warnings, hasAlternative: altGeom != null);
+          if (choice == _RouteChoice.cancel) {
+            if (mounted) setState(() => _isCalculatingRoute = false);
+            return;
+          }
+          if (choice == _RouteChoice.alternative && altGeom != null) {
+            _lastRouteGeometry   = altGeom;
+            _routeHazardWarnings = _warningsOnRoute(altGeom, hazardPoints);
+            wasRerouted = true;
+            wayPoints = _wayPointsFor(origin, center, altGeom, forceDetour: true);
+          } else {
+            // Continue on the warned route.
+            _lastRouteGeometry   = primary.geometry;
+            _routeHazardWarnings = primary.warnings;
+            wayPoints = _wayPointsFor(origin, center, primary.geometry, forceDetour: false);
+          }
+        } else {
+          // Clean primary route.
+          _lastRouteGeometry   = primary.geometry;
+          _routeHazardWarnings = [];
+          wayPoints = _wayPointsFor(origin, center, primary.geometry, forceDetour: false);
+        }
+      }
+
+      final wasAdjusted = wasRerouted;
+
+      await HiveService.cacheEvacuationRoute({
+        'start': {'lat': _currentLocation!.latitude, 'lng': _currentLocation!.longitude},
+        'end':   {'lat': center.latitude, 'lng': center.longitude, 'name': center.name},
+        'waypoints': wayPoints
+            .sublist(1, wayPoints.length - 1)
+            .map((w) => {'lat': w.latitude, 'lng': w.longitude})
+            .toList(),
+        'geometry': _lastRouteGeometry
+            .map((p) => {'lat': p.latitude, 'lng': p.longitude})
+            .toList(),
+        'adjustedForHazards': wasAdjusted,
+        'cachedAt': DateTime.now().toIso8601String(),
+      });
+
+      if (mounted) {
+        setState(() => _isCalculatingRoute = false);
+        if (wasAdjusted) _showRoutingAdjustedSnackbar();
+        if (_routeHazardWarnings.isNotEmpty) {
+          setState(() => _showHazardWarningBanner = true);
+          _showHazardOnRouteSnackbar(_routeHazardWarnings);
+        }
+      }
+
+      try {
+        await _mapboxNavigation?.startNavigation(
+            wayPoints: wayPoints, options: _buildMapboxOptions());
+      } catch (e) {
+        print('[Evacuation] Navigation start error: $e');
+        if (mounted) {
+          _showErrorDialog('Failed to start navigation. Please try again.');
+          setState(() => _isCalculatingRoute = false);
+        }
+      }
+
+    } else {
+      // ── OFFLINE PATH ──────────────────────────────────────────────────────
+      final cached = await HiveService.getCachedEvacuationRoute();
+      if (mounted) setState(() { _isCalculatingRoute = false; _isOfflineMode = true; });
+
+      if (cached != null) {
+        final geoRaw = cached['geometry'] as List? ?? [];
+        final geometry = geoRaw.map((g) {
+          final m = g is Map<String, dynamic> ? g : Map<String, dynamic>.from(g as Map);
+          return LatLng((m['lat'] as num).toDouble(), (m['lng'] as num).toDouble());
+        }).toList();
+
+        if (geometry.isNotEmpty) {
+          if (mounted) setState(() => _offlineRouteGeometry = geometry);
+          _mapController.fitCamera(CameraFit.coordinates(
+            coordinates: geometry,
+            padding: const EdgeInsets.all(48),
+          ));
+        } else {
+          if (mounted) setState(() => _isCompassMode = true);
+        }
+      } else {
+        if (mounted) setState(() => _isCompassMode = true);
       }
     }
+  }
 
-    final wayPoints = [
-      WayPoint(
-        name: "My Location",
-        latitude: _currentLocation!.latitude,
-        longitude: _currentLocation!.longitude,
+  // Informational hazards on a route: anything within warnRadius that isn't a
+  // blocking critical (within blockRadius). Drives the orange banner + snackbar.
+  List<HazardPoint> _warningsOnRoute(List<LatLng> geom, List<HazardPoint> hazards) {
+    final blocking = HazardAwareRoutingService.hazardsWithin(
+        geom, hazards.where((h) => h.isCritical).toList(),
+        HazardAwareRoutingService.blockRadius);
+    final near = HazardAwareRoutingService.hazardsWithin(
+        geom, hazards, HazardAwareRoutingService.warnRadius);
+    return near.where((h) => !blocking.contains(h)).toList();
+  }
+
+  double _minDistanceToGeometry(LatLng p, List<LatLng> geometry) {
+    double best = double.infinity;
+    for (final g in geometry) {
+      final d = HazardAwareRoutingService.distanceMeters(p, g);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  Future<bool> _showCriticalHazardDialog(HazardPoint hazard) async {
+    return await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.dangerous, color: Colors.red),
+          SizedBox(width: 8),
+          Text('Hazard Cannot Be Avoided'),
+        ]),
+        content: Text(
+          'An active ${hazard.label} has been reported and all available '
+          'routes pass through the affected area.\n\n'
+          'Proceeding may be dangerous. Only continue if it is safe to do so.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Proceed Anyway',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
-      WayPoint(
-        name: center.name,
-        latitude: center.latitude,
-        longitude: center.longitude,
+    ) ?? false;
+  }
+
+  // Warning/watch hazard on the route → let the user choose. Offers "Use
+  // alternative" only when a hazard-free alternative actually exists, plus
+  // "Continue" (proceed on the warned route) and "Cancel".
+  Future<_RouteChoice> _showHazardOnRouteDialog(
+      List<HazardPoint> warnings, {required bool hasAlternative}) async {
+    final h = warnings.first;
+    final color = _getHazardColor(h.severity);
+    final summary = warnings.length == 1
+        ? 'A ${h.label} has been reported on your route.'
+        : '${warnings.length} hazards have been reported on your route '
+          '(${h.label} and ${warnings.length - 1} more).';
+    final result = await showDialog<_RouteChoice>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          Icon(Icons.warning_amber_rounded, color: color),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Hazard on Route')),
+        ]),
+        content: Text(
+          hasAlternative
+              ? '$summary\n\nWould you like to take an alternative route that '
+                'avoids it, or continue on this one?'
+              : '$summary\n\nThere is no alternative route that avoids it. '
+                'Continue with caution?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _RouteChoice.cancel),
+            child: const Text('Cancel'),
+          ),
+          if (hasAlternative)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, _RouteChoice.alternative),
+              child: const Text('Use Alternative'),
+            ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, _RouteChoice.continueRoute),
+            style: ElevatedButton.styleFrom(backgroundColor: color),
+            child: const Text('Continue', style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
-    ];
-
-    if (mounted) setState(() => _isCalculatingRoute = false);
-
-    await _mapboxNavigation?.startNavigation(
-      wayPoints: wayPoints,
-      options: _mapboxOptions!,
     );
+    return result ?? _RouteChoice.cancel;
+  }
+
+  // Non-blocking heads-up shown after navigation starts when the user chose to
+  // continue on a route that still has a watch/warning hazard.
+  void _showHazardOnRouteSnackbar(List<HazardPoint> warnings) {
+    if (!mounted || warnings.isEmpty) return;
+    final h = warnings.first;
+    final message = warnings.length == 1
+        ? '${h.label} reported on this street — proceed with caution'
+        : '${h.label} and ${warnings.length - 1} more reported on this street — proceed with caution';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Row(children: [
+        const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+        const SizedBox(width: 8),
+        Expanded(child: Text(message)),
+      ]),
+      backgroundColor: _getHazardColor(h.severity),
+      duration: const Duration(seconds: 4),
+    ));
+  }
+
+  void _showRoutingAdjustedSnackbar() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Row(children: [
+        Icon(Icons.alt_route, color: Colors.white, size: 18),
+        SizedBox(width: 8),
+        Expanded(child: Text('Route adjusted for safety — avoiding hazard zone')),
+      ]),
+      backgroundColor: Colors.deepOrange,
+      duration: const Duration(seconds: 3),
+    ));
   }
 
   void _stopNavigation() {
@@ -580,6 +1294,8 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       setState(() {
         _isNavigating = false;
         _destinationCenter = null;
+        _isCompassMode = false;
+        _offlineRouteGeometry = [];
       });
     }
   }
@@ -646,50 +1362,88 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
   Color _getHazardColor(String severity) {
     switch (severity) {
       case 'critical':
-        return const Color(0xFFDC2626);
+      case 'evacuate':
+        return const Color(0xFFDC2626);  // red
       case 'warning':
-        return const Color(0xFFF59E0B);
+      case 'high':
+        return const Color(0xFFF97316);  // orange
+      case 'watch':
+      case 'moderate':
+        return const Color(0xFFFBBF24);  // yellow
       default:
-        return const Color(0xFF6366F1);
+        return const Color(0xFF6366F1);  // indigo
     }
   }
 
-  // ── Dialogs ────────────────────────────────
-
-  Future<bool> _showHazardWarningDialog(String centerName) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: const Row(
-              children: [
-                Icon(Icons.warning_amber, color: Colors.orange),
-                SizedBox(width: 8),
-                Text('Hazard Warning'),
-              ],
-            ),
-            content: Text(
-              'There is an active hazard zone near "$centerName". '
-              'Proceed with caution — emergency services may be present.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Choose Another'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange,
-                    foregroundColor: Colors.white),
-                child: const Text('Proceed Anyway'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
+  double _getHazardOpacity(String severity) {
+    switch (severity) {
+      case 'critical':
+      case 'evacuate':
+        return 0.50;
+      case 'warning':
+      case 'high':
+        return 0.40;
+      default:
+        return 0.25;  // watch / moderate — lighter so map stays readable
+    }
   }
+
+  Color _hazardBadgeColor(String severity) {
+    switch (severity) {
+      case 'critical': return const Color(0xFFDC2626);
+      case 'high':     return const Color(0xFFF59E0B);
+      case 'moderate': return const Color(0xFFEAB308);
+      default:         return Colors.transparent;
+    }
+  }
+
+  String _hazardSeverityLabel(String severity) {
+    switch (severity) {
+      case 'critical': return 'Critical';
+      case 'high':     return 'Warning';
+      case 'moderate': return 'Watch';
+      default:         return '';
+    }
+  }
+
+  // ── Compass widget ─────────────────────────
+
+  Widget _buildCompassWidget(EvacuationCenter dest, LatLng current) {
+    final dist    = HazardAwareRoutingService.distanceMeters(current, dest.latLng);
+    final bearing = _bearing(current, dest.latLng);
+    final distTxt = dist < 1000
+        ? '${dist.round()} m'
+        : '${(dist / 1000).toStringAsFixed(1)} km';
+    return Material(
+      color: Colors.black87,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(children: [
+          const Icon(Icons.explore, color: Colors.white, size: 28),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(dest.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            Text('$distTxt  •  ${bearing.round()}°',
+                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            const Text('No cached route — navigate manually',
+                style: TextStyle(color: Colors.orange, fontSize: 11)),
+          ])),
+        ]),
+      ),
+    );
+  }
+
+  double _bearing(LatLng from, LatLng to) {
+    final dLng = _toRadians(to.longitude - from.longitude);
+    final lat1 = _toRadians(from.latitude);
+    final lat2 = _toRadians(to.latitude);
+    final y = sin(dLng) * cos(lat2);
+    final x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLng);
+    return (atan2(y, x) * 180 / pi + 360) % 360;
+  }
+
+  // ── Dialogs ────────────────────────────────
 
   void _showArrivalDialog() {
     if (!mounted) return;
@@ -767,7 +1521,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Handle bar
               Center(
                 child: Container(
                   width: 40,
@@ -831,7 +1584,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
 
               const SizedBox(height: 20),
 
-              // Action buttons
               Row(
                 children: [
                   Expanded(
@@ -882,6 +1634,119 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
         const SizedBox(width: 8),
         Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
       ],
+    );
+  }
+
+  // ── Nearest center suggestion ──────────────
+
+  EvacuationCenter? get _suggestedCenter {
+    if (_evacuationCenters.isEmpty) return null;
+    try {
+      return _evacuationCenters.firstWhere((c) => c.status != 'full');
+    } catch (_) {
+      return _evacuationCenters.first;
+    }
+  }
+
+  Widget _buildSuggestedCenterCard(EvacuationCenter center) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.red.shade700, Colors.red.shade500],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6)],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(children: [
+              Icon(Icons.my_location, color: Colors.white70, size: 13),
+              SizedBox(width: 4),
+              Text('Nearest Available Center',
+                  style: TextStyle(color: Colors.white70, fontSize: 11)),
+            ]),
+            const SizedBox(height: 4),
+            Text(center.name,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15)),
+            const SizedBox(height: 2),
+            Row(children: [
+              const Icon(Icons.directions_walk, color: Colors.white70, size: 13),
+              const SizedBox(width: 4),
+              Text(center.distance,
+                  style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              const SizedBox(width: 12),
+              const Icon(Icons.people, color: Colors.white70, size: 13),
+              const SizedBox(width: 4),
+              Text(
+                '${center.currentOccupancy}/${center.capacity}',
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => _startEvacuation(center),
+                icon: const Icon(Icons.emergency, size: 16),
+                label: const Text('Navigate Now'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.red.shade700,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  textStyle: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Center list (always attaches scrollController) ────────────────────
+
+  Widget _buildCenterList(ScrollController scrollController) {
+    if (_isLoadingCenters) {
+      return ListView(
+        controller: scrollController,
+        children: const [
+          SizedBox(height: 40),
+          Center(child: CircularProgressIndicator()),
+        ],
+      );
+    }
+    if (_evacuationCenters.isEmpty) {
+      return ListView(
+        controller: scrollController,
+        children: const [
+          SizedBox(height: 40),
+          Center(child: Text('No evacuation centers found')),
+        ],
+      );
+    }
+    final hasSuggested = _currentLocation != null && _suggestedCenter != null;
+    final listCenters = hasSuggested
+        ? _evacuationCenters.where((c) => c.id != _suggestedCenter!.id).toList()
+        : _evacuationCenters;
+    return ListView.builder(
+      controller: scrollController,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      itemCount: listCenters.length + (hasSuggested ? 1 : 0),
+      itemBuilder: (context, index) {
+        if (hasSuggested && index == 0) {
+          return _buildSuggestedCenterCard(_suggestedCenter!);
+        }
+        return _buildCenterCard(listCenters[hasSuggested ? index - 1 : index]);
+      },
     );
   }
 
@@ -943,6 +1808,28 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                         ),
                       ],
                     ),
+                    if (center.hazardSeverityLevel != 'none') ...[
+                      const SizedBox(height: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: _hazardBadgeColor(center.hazardSeverityLevel),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.warning_amber_rounded, size: 10, color: Colors.white),
+                          const SizedBox(width: 3),
+                          Text(
+                            center.wasRerouted
+                                ? 'Rerouted • ${center.hazardType ?? "Hazard"}'
+                                : '${_hazardSeverityLabel(center.hazardSeverityLevel)} • '
+                                  '${center.hazardType ?? "Hazard"}',
+                            style: const TextStyle(
+                                fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600),
+                          ),
+                        ]),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -987,17 +1874,39 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                 userAgentPackageName: 'com.e_telly.app',
               ),
 
-              // Hazard circles
+              // Cached offline route
+              if (_offlineRouteGeometry.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _offlineRouteGeometry,
+                      strokeWidth: 5.0,
+                      color: Colors.blue.shade700,
+                    ),
+                  ],
+                ),
+
+              // Hazard pin markers — exact location, no oversized circles
               if (_hazardZones.isNotEmpty)
-                CircleLayer(
-                  circles: _hazardZones.map((hazard) {
-                    return CircleMarker(
+                MarkerLayer(
+                  markers: _hazardZones.map((hazard) {
+                    final color = _getHazardColor(hazard.severity);
+                    return Marker(
+                      width: 32,
+                      height: 32,
                       point: hazard.center,
-                      radius: hazard.radius * 1000,
-                      color: _getHazardColor(hazard.severity).withOpacity(0.4),
-                      borderStrokeWidth: 2,
-                      borderColor: _getHazardColor(hazard.severity),
-                      useRadiusInMeter: true,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: color,
+                          border: Border.all(color: Colors.white, width: 2),
+                          boxShadow: const [
+                            BoxShadow(color: Colors.black26, blurRadius: 4),
+                          ],
+                        ),
+                        child: const Icon(Icons.warning_amber_rounded,
+                            color: Colors.white, size: 16),
+                      ),
                     );
                   }).toList(),
                 ),
@@ -1005,7 +1914,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
               // Markers
               MarkerLayer(
                 markers: [
-                  // Current location
                   if (_currentLocation != null)
                     Marker(
                       width: 30,
@@ -1024,7 +1932,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                       ),
                     ),
 
-                  // Destination pin (shown while calculating)
                   if (_destinationCenter != null && _isCalculatingRoute)
                     Marker(
                       width: 40,
@@ -1037,7 +1944,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                       ),
                     ),
 
-                  // Center pins
                   ..._evacuationCenters.map((center) {
                     return Marker(
                       width: 32,
@@ -1093,7 +1999,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                     height: 18,
                     child: CircularProgressIndicator(
                         strokeWidth: 2, color: Colors.white)),
-                message: 'Starting Mapbox navigation…',
+                message: 'Calculating safe route…',
               ),
             ),
 
@@ -1145,6 +2051,71 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
               ),
             ),
 
+          // ── Watch/Warning route banner ──
+          if (_showHazardWarningBanner && _routeHazardWarnings.isNotEmpty)
+            Positioned(
+              top: _isNavigating ? 100 : 60,
+              left: 16,
+              right: 72,
+              child: Material(
+                color: Colors.orange.shade700,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  child: Row(children: [
+                    const Icon(Icons.warning_amber, color: Colors.white, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${_routeHazardWarnings.first.label} on route — proceed with caution',
+                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => setState(() => _showHazardWarningBanner = false),
+                      child: const Icon(Icons.close, color: Colors.white, size: 16),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+
+          // ── Offline mode banner ──
+          if (_isOfflineMode)
+            Positioned(
+              bottom: 260,
+              left: 16,
+              right: 16,
+              child: Material(
+                color: Colors.blueGrey.shade700,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  child: Row(children: [
+                    const Icon(Icons.wifi_off, color: Colors.white, size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                    child: Text(
+                      _offlineRouteGeometry.isNotEmpty
+                          ? 'Offline — Showing cached route'
+                          : 'Offline Mode — Using cached data',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
+                  ),
+                  ]),
+                ),
+              ),
+            ),
+
+          // ── Compass mode (offline + no cached route) ──
+          if (_isCompassMode && _destinationCenter != null && _currentLocation != null)
+            Positioned(
+              bottom: 300,
+              left: 16,
+              right: 16,
+              child: _buildCompassWidget(_destinationCenter!, _currentLocation!),
+            ),
+
           // ── Bottom draggable list (only when not navigating) ──
           if (!_isNavigating)
             DraggableScrollableSheet(
@@ -1166,7 +2137,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                   ),
                   child: Column(
                     children: [
-                      // Drag handle
                       Container(
                         margin: const EdgeInsets.only(top: 8),
                         width: 40,
@@ -1177,7 +2147,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                         ),
                       ),
 
-                      // Header
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                         child: Row(
@@ -1228,7 +2197,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                               Expanded(
                                 child: Text(
                                   '${_hazardZones.length} active hazard zone(s) in area. '
-                                  'Mapbox will route around them.',
+                                  'Route will auto-avoid critical zones.',
                                   style: TextStyle(
                                       fontSize: 11,
                                       color: Colors.orange.shade800),
@@ -1238,26 +2207,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                           ),
                         ),
 
-                      // List
-                      if (_isLoadingCenters)
-                        const Expanded(
-                          child: Center(child: CircularProgressIndicator()),
-                        )
-                      else if (_evacuationCenters.isEmpty)
-                        const Expanded(
-                          child:
-                              Center(child: Text('No evacuation centers found')),
-                        )
-                      else
-                        Expanded(
-                          child: ListView.builder(
-                            controller: scrollController,
-                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                            itemCount: _evacuationCenters.length,
-                            itemBuilder: (context, index) =>
-                                _buildCenterCard(_evacuationCenters[index]),
-                          ),
-                        ),
+                      Expanded(child: _buildCenterList(scrollController)),
                     ],
                   ),
                 );

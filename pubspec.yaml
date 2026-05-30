@@ -46,6 +46,10 @@ dependencies:
 
  
 
+dependency_overrides:
+  flutter_mapbox_navigation:
+    path: packages/flutter_mapbox_navigation
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

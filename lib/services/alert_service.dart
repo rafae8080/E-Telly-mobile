@@ -93,6 +93,9 @@ class AlertService {
         'location': alert['location'] ?? '',
         'createdAt': createdAt.toIso8601String(),
         'expiresAt': alert['expiresAt'] as String?,
+        'lat': alert['lat'],
+        'lng': alert['lng'],
+        'alertType': alert['type'] ?? 'other',
       };
     } catch (e) {
       print('[AlertService] Convert error: $e — $alert');

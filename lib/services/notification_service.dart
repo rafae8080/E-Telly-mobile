@@ -135,6 +135,33 @@ class NotificationService {
     }
   }
 
+  // Fires a local notification from in-app code (e.g. a live socket event while the
+  // user is mid-navigation). Reuses the already-created 'etelly_alerts' channel.
+  static Future<void> showLocalAlert(String title, String body,
+      {String? route}) async {
+    await _localNotifications.show(
+      DateTime.now().millisecondsSinceEpoch.remainder(100000),
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channel.id,
+          _channel.name,
+          channelDescription: _channel.description,
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: route,
+    );
+  }
+
   static void _handleForegroundMessage(RemoteMessage message) {
     final notification = message.notification;
     _incomingRouteController.add(message.data['route'] ?? 'home');
