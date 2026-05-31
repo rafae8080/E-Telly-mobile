@@ -103,6 +103,11 @@ class P2PRelayService {
   /// Fires after reports are received — controller decides whether to upload or keep advertising.
   void Function()? onReportsReceivedForRelay;
 
+  /// Fires when an outgoing relay attempt ends — success, rejection, failure,
+  /// or disconnect. Lets the controller release its connecting lock and move
+  /// on to the next (best) peer. Safe to fire more than once per cycle.
+  void Function()? onRelayCycleComplete;
+
   // ── Public API ────────────────────────────────────────────────────────────────
 
   /// Initialises the local device identity from SharedPreferences + DeviceInfo.
@@ -190,6 +195,7 @@ class P2PRelayService {
         state: TransferState.error,
         message: 'Connection failed: $e',
       ));
+      onRelayCycleComplete?.call();
     }
   }
 
@@ -246,12 +252,14 @@ class P2PRelayService {
         state: TransferState.error,
         message: 'Connection was rejected or failed.',
       ));
+      onRelayCycleComplete?.call();
     }
   }
 
   void _onDisconnected(String endpointId) {
     debugPrint('[P2P] Disconnected from $endpointId');
     _updatePeerState(endpointId, PeerState.disconnected);
+    onRelayCycleComplete?.call();
   }
 
   void _onPayloadReceived(String endpointId, Payload payload) async {
@@ -342,6 +350,7 @@ class P2PRelayService {
         message: 'No eligible reports (hop limit reached or queue empty).',
       ));
       await disconnect(endpointId);
+      onRelayCycleComplete?.call();
       return;
     }
 
@@ -396,6 +405,7 @@ class P2PRelayService {
     debugPrint('[P2P] Sent $sent/${pending.length} reports to $endpointId.');
     await Future.delayed(const Duration(seconds: 1));
     await disconnect(endpointId);
+    onRelayCycleComplete?.call();
   }
 
   Future<void> _sendBytes(String endpointId, String data) async {
