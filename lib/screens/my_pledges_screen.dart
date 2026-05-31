@@ -25,7 +25,7 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _fetchPledges();
   }
 
@@ -74,10 +74,24 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
     }
   }
 
-  List<Map<String, dynamic>> _byPledgeStatus(String status) {
+  /// Routes pledges into tabs. An accepted pledge moves from "accepted"
+  /// (in progress) to "fulfilled" once the underlying request is fulfilled.
+  List<Map<String, dynamic>> _forTab(String tab) {
     return _requests.where((req) {
-      final pledge = req['myPledge'] as Map?;
-      return pledge?['status'] == status;
+      final pStatus = (req['myPledge'] as Map?)?['status'];
+      final reqStatus = (req['status'] ?? '').toString();
+      switch (tab) {
+        case 'pending':
+          return pStatus == 'pending';
+        case 'accepted':
+          return pStatus == 'accepted' && reqStatus != 'fulfilled';
+        case 'fulfilled':
+          return pStatus == 'accepted' && reqStatus == 'fulfilled';
+        case 'declined':
+          return pStatus == 'declined';
+        default:
+          return false;
+      }
     }).toList();
   }
 
@@ -88,9 +102,11 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
         title: const Text('My Pledges', style: TextStyle(fontWeight: FontWeight.bold)),
         bottom: TabBar(
           controller: _tabController,
+          isScrollable: true,
           tabs: const [
             Tab(text: 'Pending'),
             Tab(text: 'Accepted'),
+            Tab(text: 'Fulfilled'),
             Tab(text: 'Declined'),
           ],
         ),
@@ -113,9 +129,10 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
               : TabBarView(
                   controller: _tabController,
                   children: [
-                    _PledgeList(requests: _byPledgeStatus('pending'), pledgeStatus: 'pending', onRefresh: _fetchPledges),
-                    _PledgeList(requests: _byPledgeStatus('accepted'), pledgeStatus: 'accepted', onRefresh: _fetchPledges),
-                    _PledgeList(requests: _byPledgeStatus('declined'), pledgeStatus: 'declined', onRefresh: _fetchPledges),
+                    _PledgeList(requests: _forTab('pending'), pledgeStatus: 'pending', onRefresh: _fetchPledges),
+                    _PledgeList(requests: _forTab('accepted'), pledgeStatus: 'accepted', onRefresh: _fetchPledges),
+                    _PledgeList(requests: _forTab('fulfilled'), pledgeStatus: 'fulfilled', onRefresh: _fetchPledges),
+                    _PledgeList(requests: _forTab('declined'), pledgeStatus: 'declined', onRefresh: _fetchPledges),
                   ],
                 ),
     );
@@ -133,7 +150,9 @@ class _PledgeList extends StatelessWidget {
     switch ((cat ?? '').toLowerCase()) {
       case 'water': return ET_CYAN;
       case 'food': return ET_YELLOW;
+      case 'clothing':
       case 'clothes': return ET_GREEN;
+      case 'medicine':
       case 'medical': return ET_RED;
       default: return ET_GRAY;
     }
@@ -142,6 +161,7 @@ class _PledgeList extends StatelessWidget {
   Color _badgeColor(String status) {
     switch (status) {
       case 'accepted': return ET_PURPLE;
+      case 'fulfilled': return ET_GREEN;
       case 'declined': return ET_GRAY;
       default: return ET_ORANGE;
     }
@@ -150,6 +170,7 @@ class _PledgeList extends StatelessWidget {
   String _emptyMessage(String status) {
     switch (status) {
       case 'accepted': return 'No accepted offers yet.';
+      case 'fulfilled': return 'No fulfilled offers yet.';
       case 'declined': return 'No declined offers.';
       default: return 'No pending offers.';
     }
@@ -186,7 +207,9 @@ class _PledgeList extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
               side: pledgeStatus == 'accepted'
                   ? const BorderSide(color: ET_PURPLE, width: 1.5)
-                  : BorderSide.none,
+                  : pledgeStatus == 'fulfilled'
+                      ? const BorderSide(color: ET_GREEN, width: 1.5)
+                      : BorderSide.none,
             ),
             child: Padding(
               padding: const EdgeInsets.all(14),
@@ -257,6 +280,18 @@ class _PledgeList extends StatelessWidget {
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         ),
                       ),
+                    ),
+                  ] else if (pledgeStatus == 'fulfilled') ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: const [
+                        Icon(Icons.check_circle, size: 16, color: ET_GREEN),
+                        SizedBox(width: 6),
+                        Text(
+                          'Fulfilled — thank you for helping!',
+                          style: TextStyle(fontSize: 12, color: ET_GREEN, fontWeight: FontWeight.w600),
+                        ),
+                      ],
                     ),
                   ],
                 ],

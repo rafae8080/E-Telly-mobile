@@ -81,6 +81,27 @@ abstract class FlutterMapboxNavigationPlatform extends PlatformInterface {
     );
   }
 
+  ///Replaces the route of an on-going navigation, live.
+  ///
+  /// [wayPoints] is the full origin→destination set (optionally with silent
+  /// shaping waypoints) for the new route. Unlike [addWayPoints] this rebuilds
+  /// and swaps the active route without restarting the navigation view.
+  Future<dynamic> reroute({required List<WayPoint> wayPoints}) {
+    throw UnimplementedError('reroute({required wayPoints }) has not been implemented.');
+  }
+
+  ///Draws/updates hazard markers on the active navigation map.
+  ///
+  /// [hazards] is a list of `{lat, lng, severity}` maps. Each call replaces the
+  /// previously drawn markers.
+  Future<dynamic> updateHazardMarkers({
+    required List<Map<String, dynamic>> hazards,
+  }) {
+    throw UnimplementedError(
+      'updateHazardMarkers({required hazards }) has not been implemented.',
+    );
+  }
+
   ///Ends Navigation and Closes the Navigation View
   Future<bool?> finishNavigation() async {
     throw UnimplementedError('finishNavigation() has not been implemented.');

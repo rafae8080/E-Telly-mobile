@@ -292,21 +292,71 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     await _loadHazardZones();
     if (!mounted) return;
 
-    // While navigating, warn (notification only) if a NEW critical hazard now sits
-    // on the active route. No forced reroute — the user re-checks when ready.
-    if (_isNavigating && _lastRouteGeometry.isNotEmpty) {
+    // Keep the native navigation map's hazard markers in sync with live updates.
+    _pushHazardMarkersToNav();
+
+    // While navigating, auto-reroute if a NEW critical hazard now sits on the
+    // active route (block radius). Reuses the same hazard-aware routing applied
+    // at trip start, then swaps the route live without restarting navigation.
+    if (_isNavigating && _lastRouteGeometry.isNotEmpty && _destinationCenter != null) {
       final criticals = _hazardPoints.where((h) => h.isCritical).toList();
       final onRoute = HazardAwareRoutingService.hazardsWithin(
           _lastRouteGeometry, criticals, HazardAwareRoutingService.blockRadius);
       final fresh = onRoute.where((h) => !_notifiedHazardIds.contains(h.id)).toList();
       if (fresh.isNotEmpty) {
         _notifiedHazardIds.addAll(fresh.map((h) => h.id));
-        final h = fresh.first;
-        await NotificationService.showLocalAlert(
-          'New hazard on your route',
-          '${h.label} reported on your way — re-check your route.',
-        );
+        await _liveRerouteAround(fresh);
       }
+    }
+  }
+
+  // Computes a safe route to the current destination that avoids [fresh] and
+  // swaps it into the running navigation. Falls back to a notification when no
+  // safe route can be found (e.g. every alternative is also blocked).
+  Future<void> _liveRerouteAround(List<HazardPoint> fresh) async {
+    final origin = _currentLocation;
+    final center = _destinationCenter;
+    if (origin == null || center == null) return;
+
+    final hazardPoints = _hazardPoints;
+    // Anchor detours on every critical currently blocking the active route (fall
+    // back to the freshly-detected ones), then find the shortest safe route.
+    final criticals = hazardPoints.where((h) => h.isCritical).toList();
+    final blocking = HazardAwareRoutingService.hazardsWithin(
+        _lastRouteGeometry, criticals, HazardAwareRoutingService.blockRadius);
+    print('[LiveReroute] triggered: ${fresh.length} fresh, ${blocking.length} blocking on active route');
+    final safeGeom = await _findSafeWalkingRoute(
+        origin, center.latLng, blocking.isNotEmpty ? blocking : fresh, hazardPoints);
+
+    if (!mounted) return;
+
+    if (safeGeom == null) {
+      // No route avoids it — keep the user informed (previous behaviour).
+      print('[LiveReroute] no safe route -> notify + keep current route');
+      final h = fresh.first;
+      await NotificationService.showLocalAlert(
+        'New hazard on your route',
+        '${h.label} reported on your way — re-check your route.',
+      );
+      return;
+    }
+
+    _lastRouteGeometry   = safeGeom;
+    _routeHazardWarnings = _warningsOnRoute(safeGeom, hazardPoints);
+    final wayPoints = _wayPointsFor(origin, center, safeGeom, forceDetour: true);
+
+    try {
+      print('[LiveReroute] applying reroute with ${wayPoints.length} waypoints');
+      await _mapboxNavigation?.reroute(wayPoints: wayPoints);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Hazard ahead — rerouting'),
+          backgroundColor: Colors.orange,
+          duration: Duration(seconds: 4),
+        ));
+      }
+    } catch (e) {
+      print('[Evacuation] live reroute failed: $e');
     }
   }
 
@@ -315,6 +365,25 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
   void _initMapboxNavigation() {
     _mapboxNavigation = MapBoxNavigation();
     _mapboxNavigation!.registerRouteEventListener(_onRouteEvent);
+  }
+
+  // Serializes the current hazard points into the {lat,lng,severity} payload the
+  // native navigation map expects.
+  List<Map<String, dynamic>> _hazardMarkerPayload() => _hazardPoints
+      .map((h) => {
+            'lat': h.location.latitude,
+            'lng': h.location.longitude,
+            'severity': h.severity,
+          })
+      .toList();
+
+  // Pushes the current hazards onto the native navigation map. No-op unless
+  // navigation is running (the native activity holds the map).
+  void _pushHazardMarkersToNav() {
+    if (!_isNavigating) return;
+    final payload = _hazardMarkerPayload();
+    print('[Markers] pushing ${payload.length} hazards to nav (navigating=$_isNavigating)');
+    _mapboxNavigation?.updateHazardMarkers(hazards: payload);
   }
 
   MapBoxOptions _buildMapboxOptions() => MapBoxOptions(
@@ -338,6 +407,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     switch (e.eventType) {
       case MapBoxEvent.route_built:
         if (mounted) setState(() => _isNavigating = true);
+        _pushHazardMarkersToNav();
         break;
 
       case MapBoxEvent.route_build_failed:
@@ -854,14 +924,104 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     return null;
   }
 
-  // Samples several intermediate via-points evenly along the detour [geometry] so
-  // the Mapbox Navigation SDK is pinned onto the chosen safe corridor. A single
-  // apex point isn't enough — the SDK can still reach it *through* the hazard
-  // street — so we lay down points roughly every fifth of the route (≥150 m
-  // apart, capped at 8). These are passed as SILENT waypoints, so they only shape
-  // the route, not the turn-by-turn stops. This no longer loops because the
-  // navigator now uses the walking profile (the old loop was a walking-geometry/
-  // driving-route mismatch), and waypoint order is preserved (no optimization).
+  // Fetches a single walking route through MULTIPLE ordered via-points
+  // (origin;via1;via2;…;dest). Used for corridor detours that straddle a hazard.
+  // overview=full so the geometry is dense enough for accurate hazard sampling.
+  Future<List<LatLng>> _fetchMapboxRouteViaMany(
+      LatLng origin, List<LatLng> vias, LatLng dest) async {
+    try {
+      final token = dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+      if (token.isEmpty) return [];
+      final pts = [origin, ...vias, dest];
+      final coords = pts.map((p) => '${p.longitude},${p.latitude}').join(';');
+      final url = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/walking/$coords'
+        '?alternatives=false&geometries=geojson&overview=full&access_token=$token',
+      );
+      final res = await http.get(url).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return [];
+      final routes = (jsonDecode(res.body)['routes'] as List?) ?? [];
+      if (routes.isEmpty) return [];
+      return (routes.first['geometry']['coordinates'] as List)
+          .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+          .toList();
+    } catch (e) {
+      print('[Evacuation] Corridor Directions API error: $e');
+      return [];
+    }
+  }
+
+  // Finds the SHORTEST walking route from [origin] to [dest] that clears every
+  // critical hazard at blockRadius. Searches Mapbox's own alternatives plus
+  // CORRIDOR detours (two via-points straddling each blocking hazard, both sides,
+  // escalating offsets) — a single side waypoint can't force avoidance of a hazard
+  // area, which is why earlier versions always failed and fell back to "blocked".
+  // Returns the shortest clear geometry, or null ONLY when nothing clears.
+  Future<List<LatLng>?> _findSafeWalkingRoute(LatLng origin, LatLng dest,
+      List<HazardPoint> blocking, List<HazardPoint> allHazards) async {
+    final criticals = allHazards.where((h) => h.isCritical).toList();
+    final block = HazardAwareRoutingService.blockRadius;
+    final hasToken = (dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '').isNotEmpty;
+    print('[Reroute] token=$hasToken blocking=${blocking.length} criticals=${criticals.length}');
+
+    bool clears(List<LatLng> g) =>
+        g.isNotEmpty &&
+        HazardAwareRoutingService.hazardsWithin(g, criticals, block).isEmpty;
+
+    final clear = <List<LatLng>>[];
+
+    // 1) Mapbox's own walking alternatives.
+    final alts = await _fetchMapboxAlternatives(origin, dest);
+    for (final g in alts) {
+      if (clears(g)) clear.add(g);
+    }
+    print('[Reroute] alternatives=${alts.length} clearedFromAlts=${clear.length}');
+
+    // 2) Corridor detours around the blocking hazards nearest the path first.
+    //    Cap HTTP probes so the search stays responsive.
+    final ordered = [...blocking]..sort((a, b) =>
+        _minDistanceToGeometry(a.location, [origin, dest])
+            .compareTo(_minDistanceToGeometry(b.location, [origin, dest])));
+    var probes = 0;
+    for (final h in ordered.take(2)) {
+      final corridors = HazardAwareRoutingService.computeCorridorWaypoints(
+          h.location, origin, dest);
+      for (final pair in corridors) {
+        if (probes >= 10) break;
+        probes++;
+        final geom = await _fetchMapboxRouteViaMany(origin, pair, dest);
+        if (clears(geom)) clear.add(geom);
+      }
+    }
+    print('[Reroute] corridorsProbed=$probes totalCleared=${clear.length}');
+
+    if (clear.isEmpty) {
+      print('[Reroute] no clear route -> null (dead-end)');
+      return null;
+    }
+    clear.sort((a, b) => _routeLengthMeters(a).compareTo(_routeLengthMeters(b)));
+    final direct = HazardAwareRoutingService.distanceMeters(origin, dest);
+    final lens = clear.map((g) => _routeLengthMeters(g).round()).toList();
+    print('[Reroute] straightDist=${direct.toStringAsFixed(0)}m clearedLengths=$lens');
+    print('[Reroute] chosen length=${_routeLengthMeters(clear.first).toStringAsFixed(0)}m');
+    return clear.first;
+  }
+
+  double _routeLengthMeters(List<LatLng> geom) {
+    double total = 0;
+    for (int i = 1; i < geom.length; i++) {
+      total += HazardAwareRoutingService.distanceMeters(geom[i - 1], geom[i]);
+    }
+    return total;
+  }
+
+  // Samples intermediate via-points DENSELY along the detour [geometry] so the
+  // Mapbox Navigation SDK is pinned tightly onto the chosen safe corridor. Sparse
+  // points let the navigator cut corners *between* them — straight back through
+  // the hazard — which made reroutes look like "no reroute". We therefore lay
+  // points roughly every (route / 22), ≥100 m apart, capped at 22 (Mapbox allows
+  // 25 coordinates total = origin + 22 vias + dest). These are SILENT waypoints,
+  // so they only shape the route, not the turn-by-turn stops; order is preserved.
   List<LatLng> _detourViaPoints(List<LatLng> geometry) {
     if (geometry.length < 3) return [];
     double total = 0;
@@ -870,7 +1030,8 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     }
     if (total <= 0) return [];
 
-    final interval = max(150.0, total / 6);
+    const maxPts = 22;
+    final interval = max(100.0, total / maxPts);
     final pts = <LatLng>[];
     double acc = 0;
     for (int i = 1; i < geometry.length - 1; i++) {
@@ -878,7 +1039,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       if (acc >= interval) {
         pts.add(geometry[i]);
         acc = 0;
-        if (pts.length >= 8) break;
+        if (pts.length >= maxPts) break;
       }
     }
     // Guarantee at least one shaping point for short detours.
@@ -908,19 +1069,6 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       ));
     }
     return options;
-  }
-
-  // First option with no critical hazard, preferring a fully clean one. null if
-  // every route is blocked by a critical hazard.
-  _RouteOption? _firstNonCritical(List<_RouteOption> options) {
-    _RouteOption? fallback;
-    for (final o in options) {
-      if (o.criticals.isEmpty) {
-        if (o.warnings.isEmpty) return o; // clean — best possible
-        fallback ??= o;
-      }
-    }
-    return fallback;
   }
 
   // First fully clean option (no critical, no warning), or null.
@@ -1035,13 +1183,9 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
         final primary = options.first;
 
         if (primary.criticals.isNotEmpty) {
-          // CRITICAL/EVACUATE → reroute automatically.
-          final alt = _firstNonCritical(options);
-          List<LatLng>? rerouteGeom = alt?.geometry;
-
-          // Mapbox often returns no safe alternative for short walking trips —
-          // try to force a detour around the hazard before giving up.
-          rerouteGeom ??= await _tryForcedDetour(
+          // CRITICAL/EVACUATE → reroute automatically to the SHORTEST safe route
+          // (Mapbox alternatives + forced detours). Only give up if nothing clears.
+          final rerouteGeom = await _findSafeWalkingRoute(
               origin, center.latLng, primary.criticals, hazardPoints);
 
           if (rerouteGeom != null) {
@@ -1097,6 +1241,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       final wasAdjusted = wasRerouted;
 
       await HiveService.cacheEvacuationRoute({
+        'centerId': center.id,
         'start': {'lat': _currentLocation!.latitude, 'lng': _currentLocation!.longitude},
         'end':   {'lat': center.latitude, 'lng': center.longitude, 'name': center.name},
         'waypoints': wayPoints
@@ -1108,7 +1253,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
             .toList(),
         'adjustedForHazards': wasAdjusted,
         'cachedAt': DateTime.now().toIso8601String(),
-      });
+      }, centerId: center.id);
 
       if (mounted) {
         setState(() => _isCalculatingRoute = false);
@@ -1132,26 +1277,27 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
 
     } else {
       // ── OFFLINE PATH ──────────────────────────────────────────────────────
-      final cached = await HiveService.getCachedEvacuationRoute();
+      // Restore the SAME Mapbox/hazard-aware route the user computed for THIS
+      // center while online (keyed per-center), so the OSM offline route matches
+      // what Mapbox suggested — not whatever center was navigated last.
+      final cached = await HiveService.getCachedEvacuationRouteForCenter(center.id);
       if (mounted) setState(() { _isCalculatingRoute = false; _isOfflineMode = true; });
 
-      if (cached != null) {
-        final geoRaw = cached['geometry'] as List? ?? [];
-        final geometry = geoRaw.map((g) {
-          final m = g is Map<String, dynamic> ? g : Map<String, dynamic>.from(g as Map);
-          return LatLng((m['lat'] as num).toDouble(), (m['lng'] as num).toDouble());
-        }).toList();
+      final geoRaw = (cached?['geometry'] as List?) ?? [];
+      final geometry = geoRaw.map((g) {
+        final m = g is Map<String, dynamic> ? g : Map<String, dynamic>.from(g as Map);
+        return LatLng((m['lat'] as num).toDouble(), (m['lng'] as num).toDouble());
+      }).toList();
 
-        if (geometry.isNotEmpty) {
-          if (mounted) setState(() => _offlineRouteGeometry = geometry);
-          _mapController.fitCamera(CameraFit.coordinates(
-            coordinates: geometry,
-            padding: const EdgeInsets.all(48),
-          ));
-        } else {
-          if (mounted) setState(() => _isCompassMode = true);
-        }
+      if (geometry.isNotEmpty) {
+        if (mounted) setState(() => _offlineRouteGeometry = geometry);
+        _mapController.fitCamera(CameraFit.coordinates(
+          coordinates: geometry,
+          padding: const EdgeInsets.all(48),
+        ));
       } else {
+        // No cached Mapbox route for this center (never navigated here online) →
+        // straight-line compass guidance as a last resort.
         if (mounted) setState(() => _isCompassMode = true);
       }
     }

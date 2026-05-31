@@ -41,7 +41,7 @@ class RequestContent extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Request Emergency Resources',
+          'Request Resources',
           style: TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.bold,
@@ -50,7 +50,7 @@ class RequestContent extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         const Text(
-          'Available resources for emergency situations. Select an item to request.',
+          'Select what you need and your neighbors can offer to help.',
           style: TextStyle(fontSize: 14, color: Color(0xFF6B7280)),
         ),
         const SizedBox(height: 6),
@@ -552,8 +552,8 @@ class ResourceModal extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 activeTab == 'donate'
-                    ? 'DRRMO will contact you using your profile information for pickup arrangements.'
-                    : 'DRRMO will deliver to the address in your profile. Please ensure your information is up to date.',
+                    ? 'Your neighbors will coordinate pickup with you using your profile information.'
+                    : 'Neighbors who offer to help will coordinate delivery with you directly.',
                 style: const TextStyle(
                   fontSize: 12,
                   color: Color(0xFF6B7280),
@@ -566,7 +566,7 @@ class ResourceModal extends StatelessWidget {
                   padding: EdgeInsets.zero,
                 ),
                 child: const Text(
-                  'Need help? Contact DRRMO Support',
+                  'Need help? Contact support',
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,

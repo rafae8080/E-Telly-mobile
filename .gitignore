@@ -59,3 +59,5 @@ OFFLINE_IMPLEMENTATION.md
 # Vendored Mapbox plugin's demo app — not used by this app, contains upstream
 # example tokens that trip GitHub secret scanning. Keep the plugin, drop its example.
 packages/flutter_mapbox_navigation/example/
+
+.claude

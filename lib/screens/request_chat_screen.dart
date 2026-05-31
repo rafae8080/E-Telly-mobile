@@ -67,16 +67,26 @@ class _RequestChatScreenState extends State<RequestChatScreen> {
   }
 
   void _initSocket() {
+    // forceNew avoids reusing a cached/disposed manager when the chat is
+    // re-opened; polling is kept as a fallback so live updates still work on
+    // networks where the websocket upgrade is blocked. Handlers are registered
+    // BEFORE connect() so no early event is missed.
     _socket = IO.io(
       ApiService.baseUrl,
-      IO.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),
+      IO.OptionBuilder()
+          .setTransports(['websocket', 'polling'])
+          .enableReconnection()
+          .enableForceNew()
+          .disableAutoConnect()
+          .build(),
     );
-    _socket!.connect();
     _socket!.onConnect((_) {
       if (_userId != null) {
         _socket!.emit('join', {'userId': _userId});
-        _socket!.emit('join_request', {'requestId': widget.requestId});
       }
+      // (Re)join the request room on every connect AND reconnect so we keep
+      // receiving live messages after a dropped connection.
+      _socket!.emit('join_request', {'requestId': widget.requestId});
     });
     _socket!.on('new_message', (data) {
       if (!mounted) return;
@@ -97,6 +107,7 @@ class _RequestChatScreenState extends State<RequestChatScreen> {
     _socket!.on('community_request_updated', (_) {
       if (mounted) _refreshRequest();
     });
+    _socket!.connect();
   }
 
   Future<void> _fetchMessages() async {
@@ -354,6 +365,26 @@ class _RequestChatScreenState extends State<RequestChatScreen> {
       ),
       body: Column(
         children: [
+          // Privacy disclaimer — messages are visible to CDRRMO/admins.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
+            color: ET_BLUE.withOpacity(0.06),
+            child: const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.shield_outlined, size: 15, color: ET_BLUE),
+                SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    'Messages in this chat can be viewed by CDRRMO for your safety.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11.5, color: ET_BLUE, fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+          ),
           if (isFulfilled)
             Container(
               width: double.infinity,

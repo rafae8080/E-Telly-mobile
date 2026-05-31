@@ -50,11 +50,13 @@ class HazardAwareRoutingService {
   // Two route radii (decoupled on purpose — see HAZARD plan):
   //  • blockRadius: a CRITICAL hazard within this of the route makes that street
   //    impassable → forces a reroute, and a reroute must stay outside it to count
-  //    as clear. Kept small (~one street) so parallel streets actually qualify.
+  //    as clear. STREET-LEVEL: ~one street width + GPS slack, so a hazard blocks
+  //    only its own street and the adjacent street (~50 m away) qualifies as a
+  //    valid reroute — i.e. we block one street at a time, not whole grids.
   //  • warnRadius: any hazard within this (but not blocking) just informs the user.
   // The large per-type danger zone (effectiveRadius) is only for center badges and
   // safe-center filtering, NOT for route blocking.
-  static const double _blockRadiusMeters = 70.0;
+  static const double _blockRadiusMeters = 40.0;
   static const double _warnRadiusMeters  = 200.0;
 
   static double get blockRadius => _blockRadiusMeters;
@@ -295,6 +297,46 @@ class HazardAwareRoutingService {
     return distanceMeters(cA, hazardCenter) >= distanceMeters(cB, hazardCenter)
         ? [cA, cB]
         : [cB, cA];
+  }
+
+  // Corridor detour waypoint PAIRS around [hazardCenter]. A single side via-point
+  // can't make a walking route avoid a hazard AREA — Mapbox routes via→dest
+  // straight back through the hazard street. So we straddle the hazard: place two
+  // via-points, one BEFORE and one AFTER the hazard along the origin→dest line,
+  // both pushed to the SAME side, forcing the path to swing around the whole
+  // hazard span. Returns one [via1, via2] pair per (offset × side), ordered
+  // nearest-offset first and via1 (toward origin) first within each pair. Empty if
+  // degenerate.
+  static List<List<LatLng>> computeCorridorWaypoints(
+      LatLng hazardCenter, LatLng origin, LatLng dest,
+      {List<double> offsetsMeters = const [60, 120, 200, 350]}) {
+    final dx = dest.longitude - origin.longitude; // longitude delta
+    final dy = dest.latitude  - origin.latitude;  // latitude  delta
+    final len = sqrt(dx * dx + dy * dy);
+    if (len == 0) return const [];
+
+    // Unit direction (lat,lng components) and a unit perpendicular to it.
+    final dirLat = dy / len, dirLng = dx / len;
+    final perpLat = dx / len, perpLng = -dy / len;
+    const mPerDeg = 111320.0;
+
+    LatLng pt(double sideSign, double alongSign, double side, double span) => LatLng(
+          hazardCenter.latitude +
+              alongSign * dirLat * (span / mPerDeg) +
+              sideSign * perpLat * (side / mPerDeg),
+          hazardCenter.longitude +
+              alongSign * dirLng * (span / mPerDeg) +
+              sideSign * perpLng * (side / mPerDeg),
+        );
+
+    final out = <List<LatLng>>[];
+    for (final off in offsetsMeters) {
+      final span = off + _blockRadiusMeters; // straddle clear of the block radius
+      for (final side in const [1.0, -1.0]) {
+        out.add([pt(side, -1.0, off, span), pt(side, 1.0, off, span)]);
+      }
+    }
+    return out;
   }
 
   static String _cap(String s) => s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';

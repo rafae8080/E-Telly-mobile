@@ -86,22 +86,16 @@ class ResourcesScreen extends StatefulWidget {
 }
 
 class _ResourcesScreenState extends State<ResourcesScreen> {
-  String? _selectedResource;
+  String? _selectedCategory;
   bool _showModal = false;
-  bool _isLoading = true;
-  String? _errorMessage;
 
   // Request-specific fields
-  String _requestType = 'standard';
   Position? _currentPosition;
-  String? _currentAddress;
   bool _isGettingLocation = false;
   String _requestQuantity = '1';
-  bool _requestUrgent = false;
-  String _requestNotes = '';
-  final TextEditingController _barangayController = TextEditingController();
+  String _requestDescription = '';
 
-  // Location fields (used by address resolution for emergency requests)
+  // Location fields (resolved from GPS, shown for verification)
   String _detailedAddress = '';
   String _street = '';
   String _barangay = '';
@@ -110,8 +104,16 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   String _postalCode = '';
 
   String? _userAddress;
+  String? _userBarangay;
 
-  List<resources.ResourceItem> _inventoryItems = [];
+  // Request categories shown to the resident (label → ResourceRequest enum value).
+  static const List<_RequestCategory> _categories = [
+    _RequestCategory('Food', 'food', Icons.restaurant),
+    _RequestCategory('Water', 'water', Icons.water_drop),
+    _RequestCategory('Clothes', 'clothing', Icons.checkroom),
+    _RequestCategory('Medicine', 'medicine', Icons.medical_services),
+    _RequestCategory('Others', 'other', Icons.category),
+  ];
 
   final ApiService _apiService = ApiService();
   final AuthService _authService = AuthService();
@@ -119,7 +121,6 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchInventoryItems();
     _getCurrentLocation();
     _loadUserAddress();
   }
@@ -129,121 +130,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     if (userData != null && mounted) {
       setState(() {
         _userAddress = userData['address'] as String?;
+        _userBarangay = userData['barangay'] as String?;
       });
     }
-  }
-
-  Future<void> _fetchInventoryItems() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final response = await http.get(
-        Uri.parse('${ApiService.baseUrl}/api/inventory/public'),
-      );
-
-      if (response.statusCode == 200) {
-        if (response.body.trimLeft().startsWith('<')) {
-          setState(() {
-            _errorMessage =
-                'Inventory service unavailable. Please try again later.';
-            _isLoading = false;
-          });
-          return;
-        }
-        final body = jsonDecode(response.body);
-        final List<dynamic> items = _extractList(body);
-        setState(() {
-          _inventoryItems = items.map((item) {
-            return resources.ResourceItem(
-              id: item['_id']?.toString() ?? '',
-              name: item['name'] ?? '',
-              category: item['category'] ?? 'Other',
-              description: item['description'],
-              icon: _getIconFromName(item['name'] ?? ''),
-              available: (item['quantity'] ?? 0) > 0,
-              estimatedDelivery: 'Within 1-2 hours',
-              unit: item['unit'] ?? 'pcs',
-            );
-          }).toList();
-          _isLoading = false;
-        });
-      } else {
-        setState(() {
-          _errorMessage = 'Failed to load items (HTTP ${response.statusCode})';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Failed to load items: ${e.toString()}';
-        _isLoading = false;
-      });
-    }
-  }
-
-  /// Maps any inventory category string to a valid ResourceRequest enum value:
-  /// ["food","water","clothing","medicine","hygiene","shelter","other"]
-  String _normalizeCategory(String category) {
-    switch (category.toLowerCase().trim()) {
-      case 'food':
-      case 'foods':
-      case 'nutrition':
-        return 'food';
-      case 'water':
-      case 'drinks':
-      case 'beverage':
-        return 'water';
-      case 'clothing':
-      case 'clothes':
-      case 'apparel':
-      case 'garments':
-        return 'clothing';
-      case 'medicine':
-      case 'medical':
-      case 'medication':
-      case 'medicines':
-      case 'health':
-      case 'healthcare':
-        return 'medicine';
-      case 'hygiene':
-      case 'sanitation':
-      case 'personal care':
-        return 'hygiene';
-      case 'shelter':
-      case 'housing':
-      case 'relief goods':
-        return 'shelter';
-      default:
-        return 'other';
-    }
-  }
-
-  IconData _getIconFromName(String name) {
-    switch (name.toLowerCase()) {
-      case 'megaphone':
-        return Icons.volume_up;
-      case 'flashlights':
-        return Icons.flashlight_on;
-      case 'aa batteries':
-        return Icons.battery_alert;
-      case 'generator fuel (diesel)':
-        return Icons.local_gas_station;
-      default:
-        return Icons.inventory;
-    }
-  }
-
-  List<dynamic> _extractList(dynamic body) {
-    if (body is List) return body;
-    if (body is Map) {
-      for (final key in ['data', 'requests', 'donations', 'items', 'results']) {
-        if (body[key] is List) return body[key] as List;
-      }
-    }
-    return [];
   }
 
   // ============ LOCATION METHODS ============
@@ -256,6 +145,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       return;
     }
 
+    if (mounted) setState(() => _isGettingLocation = true);
     try {
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.bestForNavigation,
@@ -277,6 +167,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       await _getAddressFromNominatim(position.latitude, position.longitude);
     } catch (err) {
       debugPrint('Geolocation Error: ${err.toString()}');
+    } finally {
+      if (mounted) setState(() => _isGettingLocation = false);
     }
   }
 
@@ -364,7 +256,6 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
             debugPrint('✅ ADDRESS: $_detailedAddress');
           });
-          _barangayController.text = _barangay;
           return;
         }
       }
@@ -423,7 +314,6 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             _detailedAddress = '${place.name ?? "Location"}';
           }
         });
-        _barangayController.text = _barangay;
       }
     } catch (e) {
       debugPrint('Geocoding error: $e');
@@ -439,7 +329,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Location Services Required'),
         content:
-            const Text('Please enable GPS/location services for emergency requests.'),
+            const Text('Please enable GPS/location services so neighbors know where to bring help.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -458,50 +348,57 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   }
 
   Future<void> _handleSubmitRequest() async {
-    if (_selectedResource == null) return;
-
-    final resource = _inventoryItems.firstWhere(
-      (r) => r.id == _selectedResource,
-    );
+    if (_selectedCategory == null) return;
 
     final qty = int.tryParse(_requestQuantity) ?? 1;
+
+    if (_requestDescription.trim().isEmpty) {
+      _showAlert('Description Required',
+          'Please describe what you need (e.g. canned goods, t-shirts).');
+      return;
+    }
 
     if (qty < 1) {
       _showAlert('Error', 'Quantity must be at least 1');
       return;
     }
 
-    if (_requestType == 'emergency' && _currentPosition == null) {
+    if (_currentPosition == null) {
       _showAlert(
         'Location Required',
-        'For emergency requests, we need your current location.',
+        'We need your current location so neighbors know where to bring help.',
         onOk: () => _getCurrentLocation(),
       );
       return;
     }
 
     // Build the best available address string for the required `address` field.
-    // Priority: GPS-resolved detailed address → user profile address → barangay name.
+    // Priority: GPS-resolved detailed address → user profile address.
     final String resolvedAddress = (_detailedAddress.isNotEmpty &&
             _detailedAddress != 'Getting address...' &&
             _detailedAddress != 'Unable to get address' &&
             _detailedAddress != 'Please enter your location manually')
         ? _detailedAddress
-        : (_userAddress != null && _userAddress!.isNotEmpty)
-            ? _userAddress!
-            : _barangay;
+        : (_userAddress ?? '');
+
+    // Use the resident's profile barangay so the request shows up on the Open
+    // Needs board (which filters by barangay); fall back to the geocoded
+    // barangay, then city, then the full address — anything but empty, so the
+    // request never ends up labelled "unknown".
+    String barangay = (_userBarangay != null && _userBarangay!.isNotEmpty)
+        ? _userBarangay!
+        : _barangay;
+    if (barangay.trim().isEmpty) barangay = _city;
+    if (barangay.trim().isEmpty) barangay = resolvedAddress;
 
     final requestData = {
-      'resourceId': _selectedResource,
-      'resourceName': resource.name,
-      'itemDescription': resource.name,
-      'category': _normalizeCategory(resource.category),
-      'unit': resource.unit ?? 'pcs',
+      'itemDescription': _requestDescription.trim(),
+      'category': _selectedCategory,
+      'unit': 'pcs',
       'quantity': qty,
       'address': resolvedAddress,
-      'barangay': _barangay,
-      'requestType': _requestType,
-      'reason': _requestNotes.trim(),
+      'barangay': barangay,
+      'reason': '',
       'gpsLat': _currentPosition?.latitude,
       'gpsLng': _currentPosition?.longitude,
     };
@@ -509,44 +406,25 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     try {
       final response = await _apiService.authenticatedPost(
           '/api/community/requests', requestData);
-      if (response.statusCode == 409) {
-        _showAlert('Already Requested',
-            'You already have an active request in this category.');
-        return;
-      }
       final success = response.statusCode == 200 || response.statusCode == 201;
 
       if (success) {
-        await _fetchInventoryItems();
-
-        String message = _requestType == 'standard'
-            ? '✅ STANDARD REQUEST SUBMITTED\n\n'
-                'Item: ${resource.name}\n'
-                'Quantity: $qty ${resource.unit}\n\n'
-                '📍 Pick up at: DSWD Office\n'
-                'Navotas City Hall Compound\n\n'
-                'Please bring a valid ID for verification.'
-            : '🚨 EMERGENCY REQUEST SENT 🚨\n\n'
-                'Item: ${resource.name}\n'
-                'Quantity: $qty ${resource.unit}\n\n'
-                '📍 Location sent to DSWD\n\n'
-                'Emergency responders have been notified!\n'
-                'Help is on the way!';
+        final message = '✅ Request posted to People in Need\n\n'
+            'Item: ${_requestDescription.trim()}\n'
+            'Quantity: $qty pcs\n\n'
+            'Neighbors in your barangay can now offer to help. '
+            'You\'ll be notified when someone responds.';
 
         _showAlert(
-          _requestType == 'emergency'
-              ? 'EMERGENCY REQUEST'
-              : 'Request Submitted',
+          'Request Submitted',
           message,
           onOk: () {
             setState(() {
               _showModal = false;
               _requestQuantity = '1';
-              _requestUrgent = false;
-              _requestNotes = '';
-              _requestType = 'standard';
+              _requestDescription = '';
               _currentPosition = null;
-              _selectedResource = null;
+              _selectedCategory = null;
             });
             Navigator.push(
               context,
@@ -566,74 +444,65 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     }
   }
 
-  void _handleRequestSelect(String resourceId) {
+  void _handleCategorySelect(String categoryValue) {
     setState(() {
-      _selectedResource = resourceId;
-      _requestType = 'standard';
-      _currentPosition = null;
+      _selectedCategory = categoryValue;
+      _requestDescription = '';
+      _requestQuantity = '1';
       _showModal = true;
     });
   }
 
   Widget _buildRequestForm() {
+    final category = _categories.firstWhere(
+      (c) => c.value == _selectedCategory,
+      orElse: () => _categories.last,
+    );
+    final Color catColor = _getCategoryColor(category.value);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Request Type',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: Card(
-                color: _requestType == 'standard' ? Colors.blue.shade50 : null,
-                child: InkWell(
-                  onTap: () => setState(() => _requestType = 'standard'),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        Icon(Icons.person_pin_circle,
-                            size: 40, color: Colors.blue.shade700),
-                        const SizedBox(height: 8),
-                        const Text('Standard',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        const Text('Pick up at DSWD Office',
-                            style: TextStyle(fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                ),
+        // Selected category (read-only header)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: catColor.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: catColor.withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              Icon(category.icon, color: catColor, size: 22),
+              const SizedBox(width: 10),
+              Text(
+                category.label,
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: catColor),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Card(
-                color: _requestType == 'emergency' ? Colors.red.shade50 : null,
-                child: InkWell(
-                  onTap: () => setState(() => _requestType = 'emergency'),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        Icon(Icons.emergency,
-                            size: 40, color: Colors.red.shade700),
-                        const SizedBox(height: 8),
-                        const Text('Emergency',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        const Text('Send location to DSWD',
-                            style: TextStyle(fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 20),
+
+        const Text('What do you need?',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        TextField(
+          maxLines: 3,
+          decoration: InputDecoration(
+            hintText: category.value == 'food'
+                ? 'e.g. canned goods, rice'
+                : category.value == 'clothing'
+                    ? 'e.g. t-shirts, blankets'
+                    : 'Describe what you need',
+            border: const OutlineInputBorder(),
+          ),
+          onChanged: (value) => _requestDescription = value,
+        ),
+        const SizedBox(height: 20),
 
         const Text('Quantity',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
@@ -657,7 +526,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 onChanged: (value) {
                   int qty = int.tryParse(value) ?? 1;
                   if (qty >= 1) {
-                    setState(() => _requestQuantity = qty.toString());
+                    _requestQuantity = qty.toString();
                   }
                 },
                 decoration: const InputDecoration(border: OutlineInputBorder()),
@@ -672,79 +541,61 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 20),
 
-        TextField(
-          maxLines: 3,
-          decoration: const InputDecoration(
-            labelText: 'Reason (optional)',
-            border: OutlineInputBorder(),
-          ),
-          onChanged: (value) => _requestNotes = value,
-        ),
-        const SizedBox(height: 12),
-
-        const Text('Barangay',
+        // Location (always shown so the resident can verify the address)
+        const Text('Your location',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        const Text(
+          'Neighbors use this to find you. Make sure it looks correct.',
+          style: TextStyle(fontSize: 12, color: ET_GRAY),
+        ),
         const SizedBox(height: 8),
-        TextField(
-          controller: _barangayController,
-          decoration: const InputDecoration(
-            hintText: 'e.g. Bagong Nayon',
-            border: OutlineInputBorder(),
-            prefixIcon: Icon(Icons.location_city),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF9FAFB),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+          ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.location_on, color: ET_BLUE),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _detailedAddress.isNotEmpty
+                          ? _detailedAddress
+                          : (_isGettingLocation
+                              ? 'Getting your location…'
+                              : 'No location captured yet'),
+                      style: const TextStyle(color: Color(0xFF1F2937)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _isGettingLocation ? null : _getCurrentLocation,
+                  icon: _isGettingLocation
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.my_location),
+                  label: Text(_currentPosition == null
+                      ? 'Share My Location'
+                      : 'Refresh Location'),
+                ),
+              ),
+            ],
           ),
         ),
-
-        if (_requestType == 'emergency') ...[
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.red.shade50,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.red.shade200),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.location_on, color: Colors.red.shade700),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _currentAddress != null
-                            ? _currentAddress!
-                            : (_detailedAddress.isNotEmpty
-                                ? _detailedAddress
-                                : 'No location captured'),
-                        style: TextStyle(color: Colors.red.shade900),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _isGettingLocation ? null : _getCurrentLocation,
-                    icon: _isGettingLocation
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.my_location),
-                    label: Text(_currentPosition == null
-                        ? 'Share My Location'
-                        : 'Update Location'),
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red.shade700),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
         const SizedBox(height: 24),
 
         // REQUEST BUTTON
@@ -753,20 +604,16 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           child: ElevatedButton(
             onPressed: _handleSubmitRequest,
             style: ElevatedButton.styleFrom(
-              backgroundColor: _requestType == 'emergency'
-                  ? Colors.red.shade700
-                  : Colors.blue.shade700,
+              backgroundColor: ET_BLUE,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(vertical: 16),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
             ),
-            child: Text(
-              _requestType == 'emergency'
-                  ? 'SUBMIT EMERGENCY REQUEST'
-                  : 'SUBMIT REQUEST',
-              style: const TextStyle(
+            child: const Text(
+              'SUBMIT REQUEST',
+              style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
               ),
@@ -802,11 +649,15 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         return const Color(0xFF06B6D4);
       case 'food':
         return const Color(0xFFF59E0B);
+      case 'clothing':
       case 'clothes':
         return const Color(0xFF10B981);
+      case 'medicine':
       case 'medical':
         return const Color(0xFFDC2626);
-      case 'communication':
+      case 'hygiene':
+        return const Color(0xFF7C3AED);
+      case 'shelter':
         return const Color(0xFF3B82F6);
       default:
         return const Color(0xFF666666);
@@ -817,19 +668,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     return category;
   }
 
-  @override
-  void dispose() {
-    _barangayController.dispose();
-    super.dispose();
-  }
-
-  void _showItemPickerSheet() {
-    if (_isLoading) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Loading resources, please wait...')),
-      );
-      return;
-    }
+  void _showCategoryPickerSheet() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -838,8 +677,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       ),
       builder: (ctx) => DraggableScrollableSheet(
         expand: false,
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
         builder: (_, scroll) => Column(
           children: [
             Padding(
@@ -847,7 +686,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               child: Row(
                 children: [
                   const Text(
-                    'Select a Resource',
+                    'What do you need help with?',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const Spacer(),
@@ -859,17 +698,49 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               ),
             ),
             Expanded(
-              child: SingleChildScrollView(
+              child: ListView(
                 controller: scroll,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: resources.RequestContent(
-                  items: _inventoryItems,
-                  getCategoryColor: _getCategoryColor,
-                  onItemSelect: (id) {
-                    Navigator.pop(ctx);
-                    _handleRequestSelect(id);
-                  },
-                ),
+                children: _categories.map((cat) {
+                  final color = _getCategoryColor(cat.value);
+                  return Card(
+                    elevation: 1,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _handleCategorySelect(cat.value);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 44,
+                              height: 44,
+                              decoration: BoxDecoration(
+                                color: color.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(cat.icon, color: color, size: 24),
+                            ),
+                            const SizedBox(width: 14),
+                            Text(
+                              cat.label,
+                              style: const TextStyle(
+                                  fontSize: 16, fontWeight: FontWeight.w600),
+                            ),
+                            const Spacer(),
+                            const Icon(Icons.chevron_right, color: ET_GRAY),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
               ),
             ),
           ],
@@ -883,36 +754,17 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showItemPickerSheet,
+        onPressed: _showCategoryPickerSheet,
         icon: const Icon(Icons.add),
         label: const Text('Request Resources'),
         backgroundColor: ET_BLUE,
       ),
       body: Stack(
         children: [
-          _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _errorMessage != null
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.error_outline,
-                              size: 64, color: Colors.red),
-                          const SizedBox(height: 16),
-                          Text(_errorMessage!, textAlign: TextAlign.center),
-                          const SizedBox(height: 16),
-                          ElevatedButton(
-                            onPressed: _fetchInventoryItems,
-                            child: const Text('Retry'),
-                          ),
-                        ],
-                      ),
-                    )
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.all(20),
-                      child: _buildCommunityHub(),
-                    ),
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: _buildCommunityHub(),
+          ),
           if (_showModal)
             GestureDetector(
               onTap: () => setState(() => _showModal = false),
@@ -924,14 +776,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 resource: null,
                 activeTab: 'request',
                 quantity: _requestQuantity,
-                urgent: _requestUrgent,
-                notes: _requestNotes,
+                urgent: false,
+                notes: _requestDescription,
                 getCategoryColor: _getCategoryColor,
                 getCategoryName: _getCategoryName,
                 onClose: () => setState(() => _showModal = false),
                 onQuantityChanged: (qty) => setState(() => _requestQuantity = qty),
-                onUrgentChanged: (value) => setState(() => _requestUrgent = value),
-                onNotesChanged: (text) => setState(() => _requestNotes = text),
+                onUrgentChanged: (_) {},
+                onNotesChanged: (text) => _requestDescription = text,
                 onSubmit: _handleSubmitRequest,
                 onContactSupport: () {},
                 customContent: _buildRequestForm(),
@@ -1065,4 +917,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       ),
     );
   }
+}
+
+/// A request category shown in the picker. [value] is the ResourceRequest
+/// backend enum value (food/water/clothing/medicine/other).
+class _RequestCategory {
+  final String label;
+  final String value;
+  final IconData icon;
+
+  const _RequestCategory(this.label, this.value, this.icon);
 }

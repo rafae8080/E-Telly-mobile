@@ -4,6 +4,15 @@ import '../constants.dart';
 import '../services/api_service.dart';
 import 'request_chat_screen.dart';
 
+/// "<qty> <unit>" plus " · <barangay>" only when the barangay is real
+/// (not empty and not the "unknown" placeholder the backend stores).
+String _qtyUnitBarangay(Map<String, dynamic> req) {
+  final base = '${req['quantity'] ?? ''} ${req['unit'] ?? ''}';
+  final brgy = (req['barangay'] ?? '').toString();
+  final showBrgy = brgy.isNotEmpty && brgy.toLowerCase() != 'unknown';
+  return showBrgy ? '$base · $brgy' : base;
+}
+
 class MyRequestsScreen extends StatefulWidget {
   const MyRequestsScreen({super.key});
 
@@ -108,7 +117,9 @@ class _RequestList extends StatelessWidget {
     switch ((cat ?? '').toLowerCase()) {
       case 'water': return ET_CYAN;
       case 'food': return ET_YELLOW;
+      case 'clothing':
       case 'clothes': return ET_GREEN;
+      case 'medicine':
       case 'medical': return ET_RED;
       default: return ET_GRAY;
     }
@@ -150,7 +161,14 @@ class _RequestList extends StatelessWidget {
               subtitle: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('${req['quantity'] ?? ''} ${req['unit'] ?? ''} · ${req['barangay'] ?? ''}'),
+                  Text(_qtyUnitBarangay(req)),
+                  if ((req['address'] ?? '').toString().isNotEmpty)
+                    Text(
+                      req['address'],
+                      style: const TextStyle(fontSize: 12, color: ET_GRAY),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   if (activePledgeCount > 0)
                     Row(
                       children: [
@@ -286,7 +304,9 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
     switch ((cat ?? '').toLowerCase()) {
       case 'water': return ET_CYAN;
       case 'food': return ET_YELLOW;
+      case 'clothing':
       case 'clothes': return ET_GREEN;
+      case 'medicine':
       case 'medical': return ET_RED;
       default: return ET_GRAY;
     }
@@ -341,9 +361,25 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              '${req['quantity'] ?? ''} ${req['unit'] ?? ''} · ${req['barangay'] ?? ''}',
+              _qtyUnitBarangay(req),
               style: const TextStyle(fontSize: 14, color: ET_GRAY),
             ),
+            if ((req['address'] ?? '').toString().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.location_on, size: 15, color: ET_GRAY),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      req['address'],
+                      style: const TextStyle(fontSize: 13, color: ET_GRAY),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             if ((req['reason'] ?? '').toString().isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(req['reason'] ?? '', style: const TextStyle(fontSize: 13)),

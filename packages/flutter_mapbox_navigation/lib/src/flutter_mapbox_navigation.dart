@@ -93,6 +93,26 @@ class MapBoxNavigation {
         .startNavigation(wayPoints, options);
   }
 
+  ///Replaces the route of an on-going navigation, live.
+  ///
+  /// [wayPoints] is the full origin→destination set (optionally with silent
+  /// shaping waypoints) for the new route. Swaps the active route without
+  /// restarting the navigation view — used for live hazard rerouting.
+  Future<dynamic> reroute({required List<WayPoint> wayPoints}) async {
+    return FlutterMapboxNavigationPlatform.instance.reroute(wayPoints: wayPoints);
+  }
+
+  ///Draws/updates hazard markers on the active navigation map.
+  ///
+  /// [hazards] is a list of `{lat, lng, severity}` maps. Each call replaces the
+  /// previously drawn markers.
+  Future<dynamic> updateHazardMarkers({
+    required List<Map<String, dynamic>> hazards,
+  }) async {
+    return FlutterMapboxNavigationPlatform.instance
+        .updateHazardMarkers(hazards: hazards);
+  }
+
   ///Ends Navigation and Closes the Navigation View
   Future<bool?> finishNavigation() async {
     return FlutterMapboxNavigationPlatform.instance.finishNavigation();

@@ -92,6 +92,25 @@ class MethodChannelFlutterMapboxNavigation
   }
 
   @override
+  Future<dynamic> reroute({required List<WayPoint> wayPoints}) async {
+    assert(wayPoints.length > 1, 'Error: WayPoints must be at least 2');
+    final pointList = _getPointListFromWayPoints(wayPoints);
+    var i = 0;
+    final wayPointMap = {for (var e in pointList) i++: e};
+    final args = <String, dynamic>{};
+    args['wayPoints'] = wayPointMap;
+    await methodChannel.invokeMethod('reroute', args);
+  }
+
+  @override
+  Future<dynamic> updateHazardMarkers({
+    required List<Map<String, dynamic>> hazards,
+  }) async {
+    final args = <String, dynamic>{'hazards': hazards};
+    await methodChannel.invokeMethod('updateHazardMarkers', args);
+  }
+
+  @override
   Future<bool?> finishNavigation() async {
     final success = await methodChannel.invokeMethod<bool?>('finishNavigation');
     return success;

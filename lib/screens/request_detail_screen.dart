@@ -138,11 +138,21 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
     switch ((cat ?? '').toLowerCase()) {
       case 'water': return ET_CYAN;
       case 'food': return ET_YELLOW;
+      case 'clothing':
       case 'clothes': return ET_GREEN;
+      case 'medicine':
       case 'medical': return ET_RED;
       case 'communication': return ET_BLUE;
       default: return ET_GRAY;
     }
+  }
+
+  String _locationText(Map<String, dynamic> req) {
+    final addr = (req['address'] ?? '').toString();
+    if (addr.isNotEmpty) return addr;
+    final brgy = (req['barangay'] ?? '').toString();
+    if (brgy.isNotEmpty && brgy.toLowerCase() != 'unknown') return brgy;
+    return 'Location not provided';
   }
 
   @override
@@ -201,7 +211,10 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
             ),
             const SizedBox(height: 10),
             _InfoRow(icon: Icons.person, text: req['requesterName'] ?? 'Anonymous'),
-            _InfoRow(icon: Icons.location_on, text: req['barangay'] ?? ''),
+            _InfoRow(
+              icon: Icons.location_on,
+              text: _locationText(req),
+            ),
             if ((req['pledgeCount'] ?? 0) > 0)
               _InfoRow(icon: Icons.people, text: '${req['pledgeCount']} people offered to help'),
             const SizedBox(height: 24),

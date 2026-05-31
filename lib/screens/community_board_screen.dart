@@ -129,11 +129,21 @@ class _CommunityBoardScreenState extends State<CommunityBoardScreen> {
     switch ((category ?? '').toLowerCase()) {
       case 'water': return ET_CYAN;
       case 'food': return ET_YELLOW;
+      case 'clothing':
       case 'clothes': return ET_GREEN;
+      case 'medicine':
       case 'medical': return ET_RED;
-      case 'communication': return ET_BLUE;
+      case 'hygiene': return ET_PURPLE;
+      case 'shelter': return ET_BLUE;
       default: return ET_GRAY;
     }
+  }
+
+  String _requesterLine(Map<String, dynamic> req) {
+    final name = (req['requesterName'] ?? 'Anonymous').toString();
+    final brgy = (req['barangay'] ?? '').toString();
+    final showBrgy = brgy.isNotEmpty && brgy.toLowerCase() != 'unknown';
+    return showBrgy ? '$name · $brgy' : name;
   }
 
   Widget _sectionHeader(String title, int count, IconData icon, Color color) {
@@ -207,14 +217,32 @@ class _CommunityBoardScreenState extends State<CommunityBoardScreen> {
               const SizedBox(height: 4),
               Row(
                 children: [
-                  const Icon(Icons.location_on, size: 13, color: ET_GRAY),
+                  const Icon(Icons.person, size: 13, color: ET_GRAY),
                   const SizedBox(width: 4),
                   Text(
-                    '${req['requesterName'] ?? 'Anonymous'} · ${req['barangay'] ?? ''}',
+                    _requesterLine(req),
                     style: const TextStyle(fontSize: 12, color: ET_GRAY),
                   ),
                 ],
               ),
+              if ((req['address'] ?? '').toString().isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.location_on, size: 13, color: ET_GRAY),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        req['address'],
+                        style: const TextStyle(fontSize: 12, color: ET_GRAY),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),

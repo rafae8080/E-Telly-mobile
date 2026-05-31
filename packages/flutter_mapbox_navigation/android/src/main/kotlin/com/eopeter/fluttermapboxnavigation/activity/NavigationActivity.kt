@@ -5,8 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.location.Location
 import android.os.Bundle
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import com.eopeter.fluttermapboxnavigation.FlutterMapboxNavigationPlugin
 import com.eopeter.fluttermapboxnavigation.R
@@ -25,6 +30,10 @@ import com.mapbox.api.directions.v5.models.RouteOptions
 import com.mapbox.geojson.Point
 import com.mapbox.maps.MapView
 import com.mapbox.maps.Style
+import com.mapbox.maps.plugin.annotation.annotations
+import com.mapbox.maps.plugin.annotation.generated.PointAnnotationManager
+import com.mapbox.maps.plugin.annotation.generated.PointAnnotationOptions
+import com.mapbox.maps.plugin.annotation.generated.createPointAnnotationManager
 import com.mapbox.maps.plugin.gestures.OnMapLongClickListener
 import com.mapbox.maps.plugin.gestures.gestures
 import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
@@ -52,7 +61,41 @@ import com.mapbox.navigation.utils.internal.ifNonNull
 class NavigationActivity : AppCompatActivity() {
     private var finishBroadcastReceiver: BroadcastReceiver? = null
     private var addWayPointsBroadcastReceiver: BroadcastReceiver? = null
+    private var rerouteBroadcastReceiver: BroadcastReceiver? = null
+    private var updateHazardsBroadcastReceiver: BroadcastReceiver? = null
+    private var hazardAnnotationManager: PointAnnotationManager? = null
+    private var hazardMapView: MapView? = null
+    private var pendingHazards: List<HashMap<*, *>> = listOf()
     private var points: MutableList<Waypoint> = mutableListOf()
+
+    companion object {
+        // Live reference to the running navigation activity so the plugin can drive
+        // it directly (reroute / hazard markers) without relying on broadcast
+        // delivery, which proved unreliable on-device.
+        @JvmStatic
+        var instance: NavigationActivity? = null
+            private set
+    }
+
+    /** Replaces the active route live with one built from [stops]. */
+    fun applyReroute(stops: List<Waypoint>) {
+        Log.d("EvacHazard", "applyReroute: ${stops.size} waypoints")
+        if (stops.isEmpty()) return
+        runOnUiThread {
+            val set = WaypointSet()
+            stops.forEach { set.add(it) }
+            requestRoutes(set)
+        }
+    }
+
+    /** Replaces the drawn hazard markers with [hazards] ({lat,lng,severity} maps). */
+    fun applyHazards(hazards: List<HashMap<*, *>>) {
+        Log.d("EvacHazard", "applyHazards: ${hazards.size} hazards")
+        runOnUiThread {
+            pendingHazards = hazards
+            renderHazards()
+        }
+    }
     private var waypointSet: WaypointSet = WaypointSet()
     private var canResetRoute: Boolean = false
     private var accessToken: String? = null
@@ -83,6 +126,7 @@ class NavigationActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = this
         setTheme(AppCompatR.style.Theme_AppCompat_NoActionBar)
         binding = NavigationActivityBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -104,6 +148,9 @@ class NavigationActivity : AppCompatActivity() {
                 enableMapLongClickIntercept = false
             }
         }
+
+        // Hazard markers are drawn directly on the navigation map once it attaches.
+        binding.navigationView.registerMapObserver(hazardMapObserver)
 
         val act = this
         // Add custom view binders
@@ -155,6 +202,45 @@ class NavigationActivity : AppCompatActivity() {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
 
+        // Live reroute: rebuild the route from the supplied waypoints and swap it
+        // into the running session via the existing requestRoutes() path.
+        rerouteBroadcastReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                @Suppress("UNCHECKED_CAST")
+                val stops = intent.getSerializableExtra("waypoints") as? MutableList<Waypoint>
+                Log.d("EvacHazard", "reroute received: ${stops?.size ?: 0} waypoints")
+                if (stops != null && stops.isNotEmpty()) {
+                    val set = WaypointSet()
+                    stops.forEach { set.add(it) }
+                    requestRoutes(set)
+                }
+            }
+        }
+
+        // Live hazard markers: replace the drawn set with the supplied hazards.
+        updateHazardsBroadcastReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val hz = intent.getSerializableExtra("hazards") as? ArrayList<*>
+                pendingHazards = hz?.filterIsInstance<HashMap<*, *>>() ?: listOf()
+                Log.d("EvacHazard", "received update: ${pendingHazards.size} hazards")
+                renderHazards()
+            }
+        }
+
+        ContextCompat.registerReceiver(
+            this,
+            rerouteBroadcastReceiver,
+            IntentFilter(NavigationLauncher.KEY_REROUTE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        ContextCompat.registerReceiver(
+            this,
+            updateHazardsBroadcastReceiver,
+            IntentFilter(NavigationLauncher.KEY_UPDATE_HAZARDS),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
         // TODO set the style Uri
         var styleUrlDay = FlutterMapboxNavigationPlugin.mapStyleUrlDay
         var styleUrlNight = FlutterMapboxNavigationPlugin.mapStyleUrlNight
@@ -184,12 +270,16 @@ class NavigationActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (instance == this) instance = null
         try { unregisterReceiver(finishBroadcastReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(addWayPointsBroadcastReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(rerouteBroadcastReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(updateHazardsBroadcastReceiver) } catch (_: Exception) {}
         super.onDestroy()
         if (FlutterMapboxNavigationPlugin.longPressDestinationEnabled) {
             binding.navigationView.unregisterMapObserver(onMapLongClick)
         }
+        binding.navigationView.unregisterMapObserver(hazardMapObserver)
         binding.navigationView.removeListener(navigationStateListener)
 
         MapboxNavigationApp.current()?.unregisterBannerInstructionsObserver(this.bannerInstructionObserver)
@@ -246,8 +336,14 @@ class NavigationActivity : AppCompatActivity() {
                         sendEvent(MapBoxEvents.ROUTE_BUILD_NO_ROUTES_FOUND)
                         return
                     }
+                    Log.d("EvacHazard", "routes built: ${routes.size}; swapping active route")
+                    // Canonical "replace the active route" — ensures a live swap when
+                    // this fires mid-navigation (reroute), not just at trip start.
+                    MapboxNavigationApp.current()?.setNavigationRoutes(routes)
                     binding.navigationView.api.routeReplayEnabled(FlutterMapboxNavigationPlugin.simulateRoute)
                     binding.navigationView.api.startActiveGuidance(routes)
+                    // Re-layer hazard markers above the freshly-drawn route line.
+                    bringHazardsToFront()
                 }
             }
         )
@@ -409,6 +505,108 @@ class NavigationActivity : AppCompatActivity() {
         if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
             sendEvent(MapBoxEvents.REROUTE_ALONG);
         }
+    }
+
+    /**
+     * Creates/retains a [PointAnnotationManager] on the navigation [MapView] so
+     * hazard markers can be drawn on top of the active route.
+     */
+    private val hazardMapObserver = object : MapViewObserver() {
+        override fun onAttached(mapView: MapView) {
+            hazardMapView = mapView
+            // Defer manager creation + drawing until the style is loaded — adding
+            // icon images/layers before that silently no-ops.
+            mapView.getMapboxMap().getStyle {
+                hazardAnnotationManager = mapView.annotations.createPointAnnotationManager()
+                Log.d("EvacHazard", "map attached, manager created; pending=${pendingHazards.size}")
+                renderHazards()
+            }
+        }
+
+        override fun onDetached(mapView: MapView) {
+            hazardAnnotationManager?.deleteAll()
+            hazardAnnotationManager = null
+            hazardMapView = null
+        }
+    }
+
+    /**
+     * Re-creates the hazard annotation layer so it sits ON TOP of the route line.
+     * The nav SDK adds the route-line layer AFTER the map attaches, which would
+     * otherwise cover markers created in onAttached. Called once a route is built.
+     */
+    private fun bringHazardsToFront() {
+        val mapView = hazardMapView ?: return
+        runOnUiThread {
+            mapView.getMapboxMap().getStyle {
+                hazardAnnotationManager?.let { mapView.annotations.removeAnnotationManager(it) }
+                hazardAnnotationManager = mapView.annotations.createPointAnnotationManager()
+                renderHazards()
+            }
+        }
+    }
+
+    /**
+     * Redraws all hazard markers from [pendingHazards]. Safe to call before the
+     * map attaches — it no-ops until [hazardAnnotationManager] exists.
+     */
+    private fun renderHazards() {
+        val mgr = hazardAnnotationManager
+        if (mgr == null) {
+            Log.d("EvacHazard", "renderHazards: manager not ready, ${pendingHazards.size} pending")
+            return
+        }
+        mgr.deleteAll()
+        val options = mutableListOf<PointAnnotationOptions>()
+        for (h in pendingHazards) {
+            val lat = (h["lat"] as? Number)?.toDouble() ?: continue
+            val lng = (h["lng"] as? Number)?.toDouble() ?: continue
+            val severity = (h["severity"] as? String) ?: "moderate"
+            options.add(
+                PointAnnotationOptions()
+                    .withPoint(Point.fromLngLat(lng, lat))
+                    .withIconImage(hazardBitmap(severity))
+                    .withIconSize(1.0)
+            )
+        }
+        if (options.isNotEmpty()) mgr.create(options)
+        Log.d("EvacHazard", "renderHazards: drew ${options.size} markers")
+    }
+
+    /**
+     * Builds a simple severity-coloured circular marker bitmap. Avoids bundling
+     * image assets — the marker is drawn programmatically.
+     */
+    private fun hazardBitmap(severity: String): Bitmap {
+        val size = 96
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val fill = when (severity.lowercase()) {
+            "critical" -> Color.parseColor("#E53935")
+            "high"     -> Color.parseColor("#FB8C00")
+            else       -> Color.parseColor("#FDD835")
+        }
+        val cx = size / 2f
+        val cy = size / 2f
+        val radius = size / 2f - 6f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        // Filled disc.
+        paint.color = fill
+        canvas.drawCircle(cx, cy, radius, paint)
+        // White ring.
+        paint.color = Color.WHITE
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 7f
+        canvas.drawCircle(cx, cy, radius, paint)
+        // White "!" so it clearly reads as a hazard, not a plain dot.
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize = size * 0.62f
+        paint.isFakeBoldText = true
+        val fm = paint.fontMetrics
+        canvas.drawText("!", cx, cy - (fm.ascent + fm.descent) / 2f, paint)
+        return bmp
     }
 
     /**

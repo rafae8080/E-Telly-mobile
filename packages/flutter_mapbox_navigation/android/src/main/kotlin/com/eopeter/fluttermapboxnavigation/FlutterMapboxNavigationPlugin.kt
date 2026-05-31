@@ -99,6 +99,12 @@ class FlutterMapboxNavigationPlugin : FlutterPlugin, MethodCallHandler,
             "addWayPoints" -> {
                 addWayPointsToNavigation(call, result)
             }
+            "reroute" -> {
+                rerouteNavigation(call, result)
+            }
+            "updateHazardMarkers" -> {
+                updateHazardMarkers(call, result)
+            }
             "finishNavigation" -> {
                 NavigationLauncher.stopNavigation(currentActivity)
             }
@@ -234,6 +240,57 @@ class FlutterMapboxNavigationPlugin : FlutterPlugin, MethodCallHandler,
             wayPoints.add(Waypoint(name, latitude, longitude, isSilent))
         }
         NavigationLauncher.addWayPoints(currentActivity, wayPoints)
+    }
+
+    // Live reroute: rebuild the full origin→destination waypoint set and swap the
+    // active route without restarting the navigation view.
+    private fun rerouteNavigation(
+        call: MethodCall,
+        result: Result
+    ) {
+        val activity = currentActivity
+        if (activity == null) {
+            result.error("NO_ACTIVITY", "No active navigation to reroute", null)
+            return
+        }
+        val arguments = call.arguments as? Map<String, Any>
+        val points = arguments?.get("wayPoints") as? HashMap<Int, Any>
+        if (points == null) {
+            result.error("NO_WAYPOINTS", "reroute requires wayPoints", null)
+            return
+        }
+        val newWayPoints = mutableListOf<Waypoint>()
+        for (item in points) {
+            val point = item.value as HashMap<*, *>
+            val name = point["Name"] as String
+            val latitude = point["Latitude"] as Double
+            val longitude = point["Longitude"] as Double
+            val isSilent = point["IsSilent"] as Boolean
+            newWayPoints.add(Waypoint(name, longitude, latitude, isSilent))
+        }
+        // Drive the live navigation activity directly (broadcast delivery proved
+        // unreliable on-device).
+        com.eopeter.fluttermapboxnavigation.activity.NavigationActivity.instance
+            ?.applyReroute(newWayPoints)
+        result.success(true)
+    }
+
+    // Draws/updates hazard markers on the active navigation map.
+    private fun updateHazardMarkers(
+        call: MethodCall,
+        result: Result
+    ) {
+        val activity = currentActivity
+        if (activity == null) {
+            result.error("NO_ACTIVITY", "No active navigation to mark", null)
+            return
+        }
+        val arguments = call.arguments as? Map<String, Any>
+        val hazards = arguments?.get("hazards") as? ArrayList<*> ?: ArrayList<Any>()
+        val typed = hazards.filterIsInstance<HashMap<*, *>>()
+        com.eopeter.fluttermapboxnavigation.activity.NavigationActivity.instance
+            ?.applyHazards(typed)
+        result.success(true)
     }
 
     override fun onListen(args: Any?, events: EventChannel.EventSink?) {

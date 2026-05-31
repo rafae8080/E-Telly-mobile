@@ -139,26 +139,49 @@ class HiveService {
 
   // ── Evacuation Routes ─────────────────────────────────────────────────────
 
-  static Future<void> cacheEvacuationRoute(Map<String, dynamic> route) async {
+  // Stores the latest route under 'route' AND, when [centerId] is given, under a
+  // per-center key so the OFFLINE path can later restore the exact Mapbox /
+  // hazard-aware route the user computed for THAT specific center (rather than
+  // whatever center happened to be navigated last).
+  static Future<void> cacheEvacuationRoute(Map<String, dynamic> route,
+      {String? centerId}) async {
     try {
       await _evacuationRoutesBox?.put('route', route);
+      if (centerId != null && centerId.isNotEmpty) {
+        await _evacuationRoutesBox?.put('route_$centerId', route);
+      }
     } catch (e) {
       print('Error caching evacuation route: $e');
     }
   }
 
+  static Map<String, dynamic>? _asStringMap(dynamic data) {
+    if (data is Map<String, dynamic>) return data;
+    if (data is Map) {
+      final converted = <String, dynamic>{};
+      data.forEach((k, v) => converted[k.toString()] = v);
+      return converted;
+    }
+    return null;
+  }
+
   static Future<Map<String, dynamic>?> getCachedEvacuationRoute() async {
     try {
-      final dynamic data = _evacuationRoutesBox?.get('route');
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map) {
-        final converted = <String, dynamic>{};
-        data.forEach((k, v) => converted[k.toString()] = v);
-        return converted;
-      }
-      return null;
+      return _asStringMap(_evacuationRoutesBox?.get('route'));
     } catch (e) {
       print('Error getting cached evacuation route: $e');
+      return null;
+    }
+  }
+
+  // The cached Mapbox route for a SPECIFIC center, or null if none was cached
+  // (e.g. the user never navigated there while online).
+  static Future<Map<String, dynamic>?> getCachedEvacuationRouteForCenter(
+      String centerId) async {
+    try {
+      return _asStringMap(_evacuationRoutesBox?.get('route_$centerId'));
+    } catch (e) {
+      print('Error getting cached evacuation route for $centerId: $e');
       return null;
     }
   }
