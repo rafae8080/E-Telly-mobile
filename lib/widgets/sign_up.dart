@@ -1,4 +1,23 @@
- import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
+
+const List<Map<String, String>> antipoloBarangays = [
+  {'id': 'bagong_nayon',  'name': 'Bagong Nayon',  'value': 'Bagong Nayon'},
+  {'id': 'beverly_hills', 'name': 'Beverly Hills', 'value': 'Beverly Hills'},
+  {'id': 'calawis',       'name': 'Calawis',       'value': 'Calawis'},
+  {'id': 'cupang',        'name': 'Cupang',         'value': 'Cupang'},
+  {'id': 'dalig',         'name': 'Dalig',          'value': 'Dalig'},
+  {'id': 'dela_paz',      'name': 'Dela Paz',       'value': 'Dela Paz'},
+  {'id': 'inarawan',      'name': 'Inarawan',       'value': 'Inarawan'},
+  {'id': 'mambugan',      'name': 'Mambugan',       'value': 'Mambugan'},
+  {'id': 'mayamot',       'name': 'Mayamot',        'value': 'Mayamot'},
+  {'id': 'munting_dilaw', 'name': 'Munting Dilaw',  'value': 'Munting Dilaw'},
+  {'id': 'san_isidro',    'name': 'San Isidro',     'value': 'San Isidro'},
+  {'id': 'san_jose',      'name': 'San Jose',       'value': 'San Jose'},
+  {'id': 'san_juan',      'name': 'San Juan',       'value': 'San Juan'},
+  {'id': 'san_luis',      'name': 'San Luis',       'value': 'San Luis'},
+  {'id': 'san_roque',     'name': 'San Roque',      'value': 'San Roque'},
+  {'id': 'santa_cruz',    'name': 'Santa Cruz',     'value': 'Santa Cruz'},
+];
 
 class SignUpHeader extends StatelessWidget {
   final bool isLoading;
@@ -83,7 +102,7 @@ class InputField extends StatelessWidget {
       case 'streetDetails':
         return 'House number, street, building, etc.';
       case 'password':
-        return '6+ characters';
+        return '8+ chars, uppercase, number & special char';
       case 'confirmPassword':
         return 'Confirm password';
       default:
@@ -171,7 +190,7 @@ class InputField extends StatelessWidget {
         if (fieldName == 'password') ...[
           const SizedBox(height: 6),
           const Text(
-            'Must be at least 6 characters long.',
+            'Must be 8+ characters with uppercase, lowercase, number & special character.',
             style: TextStyle(
               fontSize: 12,
               color: Colors.black,

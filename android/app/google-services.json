@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "927012189317-4oq4futhq6mh2o82l9q62abhacj31qfc.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.e_telly_app",
+            "certificate_hash": "a5ec58a1e86cdb1f0c9283318bf3435b219e63c4"
+          }
+        },
+        {
           "client_id": "927012189317-dh5lpl8fcrjvievc9i2e3aem9j0qaafg.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
@@ -45,6 +53,13 @@
             {
               "client_id": "927012189317-ljjmpf3d0c4ssatebm8sv3ht0rt9eml3.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "927012189317-c3soi1c46aq35a8pjftad5l4uqnugn9t.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.eTellyApp"
+              }
             }
           ]
         }

@@ -196,19 +196,24 @@ class AuthService {
     }
   }
 
-  /// Returns the user's ID from the JWT token or Google user data
+  /// Returns the user's ID from the JWT token or stored user data.
+  /// The server signs the claim as `id` (see signJwt in server/routes/auth.js)
+  /// and the stored user payload also uses `id`; older code looked for
+  /// `userId`, which never exists — leaving this null and breaking socket
+  /// room joins and "is this my message" checks. Fall back across key names
+  /// for safety.
   Future<String?> getUserId() async {
     try {
       // First try to get from token
       final token = await getToken();
       if (token != null && token != 'mock_token_for_testing') {
         final decoded = JwtDecoder.decode(token);
-        return decoded['userId'] as String?;
+        return (decoded['id'] ?? decoded['userId'] ?? decoded['_id'])?.toString();
       }
-      
+
       // If no token or mock token, get from user data
       final userData = await getUserData();
-      return userData?['userId'] as String?;
+      return (userData?['id'] ?? userData?['userId'] ?? userData?['_id'])?.toString();
     } catch (e) {
       print('>>> AuthService getUserId error: $e');
       return null;

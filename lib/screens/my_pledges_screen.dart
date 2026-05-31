@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import '../constants.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -17,6 +18,8 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
   final ApiService _api = ApiService();
   final AuthService _auth = AuthService();
   late TabController _tabController;
+  IO.Socket? _socket;
+  String? _userId;
 
   List<Map<String, dynamic>> _requests = [];
   bool _loading = true;
@@ -27,12 +30,35 @@ class _MyPledgesScreenState extends State<MyPledgesScreen> with SingleTickerProv
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
     _fetchPledges();
+    _initSocket();
   }
 
   @override
   void dispose() {
+    _socket?.disconnect();
+    _socket?.dispose();
     _tabController.dispose();
     super.dispose();
+  }
+
+  /// Live updates so a pledge moves between tabs the moment it's accepted,
+  /// declined, or the underlying request is fulfilled/cancelled — no manual
+  /// refresh needed. Mirrors the community board's socket setup.
+  Future<void> _initSocket() async {
+    _userId = await _auth.getUserId();
+    _socket = IO.io(
+      ApiService.baseUrl,
+      IO.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),
+    );
+    _socket!.connect();
+    _socket!.onConnect((_) {
+      if (_userId != null) _socket!.emit('join', {'userId': _userId});
+    });
+    // Your offer was accepted/declined (or the match was released, which also
+    // emits pledge_declined), or the request's status changed — refetch.
+    _socket!.on('pledge_accepted', (_) { if (mounted) _fetchPledges(); });
+    _socket!.on('pledge_declined', (_) { if (mounted) _fetchPledges(); });
+    _socket!.on('community_request_updated', (_) { if (mounted) _fetchPledges(); });
   }
 
   Future<void> _fetchPledges() async {

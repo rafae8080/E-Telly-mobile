@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import '../constants.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import 'request_chat_screen.dart';
 
 /// "<qty> <unit>" plus " · <barangay>" only when the barangay is real
@@ -22,7 +24,10 @@ class MyRequestsScreen extends StatefulWidget {
 
 class _MyRequestsScreenState extends State<MyRequestsScreen> with SingleTickerProviderStateMixin {
   final ApiService _api = ApiService();
+  final AuthService _auth = AuthService();
   late TabController _tabController;
+  IO.Socket? _socket;
+  String? _userId;
 
   List<Map<String, dynamic>> _requests = [];
   bool _loading = true;
@@ -33,12 +38,34 @@ class _MyRequestsScreenState extends State<MyRequestsScreen> with SingleTickerPr
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
     _fetchRequests();
+    _initSocket();
   }
 
   @override
   void dispose() {
+    _socket?.disconnect();
+    _socket?.dispose();
     _tabController.dispose();
     super.dispose();
+  }
+
+  /// Live updates so a request reflects new offers / status changes without a
+  /// manual refresh. Mirrors the community board's socket setup.
+  Future<void> _initSocket() async {
+    _userId = await _auth.getUserId();
+    _socket = IO.io(
+      ApiService.baseUrl,
+      IO.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),
+    );
+    _socket!.connect();
+    _socket!.onConnect((_) {
+      if (_userId != null) _socket!.emit('join', {'userId': _userId});
+    });
+    // A new helper offered, the request was matched/fulfilled/cancelled, or a
+    // helper marked it delivered — refetch so the tabs stay accurate.
+    _socket!.on('new_pledge', (_) { if (mounted) _fetchRequests(); });
+    _socket!.on('community_request_updated', (_) { if (mounted) _fetchRequests(); });
+    _socket!.on('request_delivered', (_) { if (mounted) _fetchRequests(); });
   }
 
   Future<void> _fetchRequests() async {
@@ -289,6 +316,33 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
     }
   }
 
+  Future<void> _releaseMatch() async {
+    setState(() { _actionLoading = true; });
+    try {
+      final response = await _api.authenticatedPatch(
+        '/api/community/requests/${widget.requestId}/release',
+        {},
+      );
+      if (response.statusCode == 200) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Match released. Your request is open again.'), backgroundColor: ET_ORANGE),
+          );
+          await _fetchDetail();
+        }
+      } else if (response.statusCode == 400) {
+        _showAlert('Cannot Release', 'This match can no longer be released — the helper may have already marked it delivered. Please contact CDRRMO.');
+      } else {
+        print('>>> releaseMatch ${response.statusCode}: ${response.body}');
+        _showAlert('Error', 'Failed to release match (${response.statusCode}).');
+      }
+    } catch (e) {
+      _showAlert('Error', 'Error: $e');
+    } finally {
+      if (mounted) setState(() { _actionLoading = false; });
+    }
+  }
+
   void _showAlert(String title, String message) {
     showDialog(
       context: context,
@@ -403,6 +457,37 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                     backgroundColor: ET_PURPLE,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _actionLoading ? null : () => showDialog(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: const Text('Release Match'),
+                      content: const Text(
+                        'Did the matched helper back out? Releasing reopens your request so other people can offer to help again.',
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Keep Match')),
+                        TextButton(
+                          onPressed: () { Navigator.pop(context); _releaseMatch(); },
+                          style: TextButton.styleFrom(foregroundColor: ET_ORANGE),
+                          child: const Text('Release'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  icon: const Icon(Icons.link_off, size: 18),
+                  label: const Text('Helper backed out? Release'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: ET_ORANGE,
+                    side: const BorderSide(color: ET_ORANGE),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                 ),

@@ -96,10 +96,17 @@ class _RequestChatScreenState extends State<RequestChatScreen> {
             ? Map<String, dynamic>.from(data['message'] as Map)
             : Map<String, dynamic>.from(data);
       }
-      if (msg != null && msg['senderId'] != _userId) {
-        setState(() { _messages.add(msg!); });
-        _scrollToBottom();
-      }
+      if (msg == null) return;
+      // Skip the echo of our own message — it's already shown optimistically
+      // and replaced with the real one by _sendMessage. Normalize the id so a
+      // String or {"$oid": "..."} shape both compare correctly.
+      final senderId = _extractId(msg['senderId']);
+      if (senderId != null && senderId == _userId) return;
+      // Safety net: never append a message we already have.
+      final msgId = _extractId(msg['_id']);
+      if (msgId != null && _messages.any((m) => _extractId(m['_id']) == msgId)) return;
+      setState(() { _messages.add(msg!); });
+      _scrollToBottom();
     });
     _socket!.on('request_delivered', (_) {
       if (mounted) _refreshRequest();
@@ -410,7 +417,7 @@ class _RequestChatScreenState extends State<RequestChatScreen> {
                         itemCount: _messages.length,
                         itemBuilder: (context, i) {
                           final msg = _messages[i];
-                          final isMine = msg['senderId'] == _userId;
+                          final isMine = _extractId(msg['senderId']) == _userId;
                           final role = msg['senderRole'] as String? ?? '';
                           final isAdmin = role == 'admin' || role == 'barangay_official';
                           return _ChatBubble(message: msg, isMine: isMine, isAdmin: isAdmin);
