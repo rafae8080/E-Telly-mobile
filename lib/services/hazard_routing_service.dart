@@ -152,6 +152,7 @@ class HazardAwareRoutingService {
     try {
       final loc = extractLatLng(a) ??
           _barangayCenter((a['barangay'] as String? ?? '').split(',').first.trim());
+      if (loc == null) return null; // no usable location — skip, like _fromReport
       final severity = a['severity'] as String? ?? 'moderate';
       final type     = a['alertType'] as String? ?? a['type'] as String? ?? 'other';
       return HazardPoint(
@@ -350,7 +351,7 @@ class HazardAwareRoutingService {
     }
   }
 
-  static LatLng _barangayCenter(String barangay) {
+  static LatLng? _barangayCenter(String barangay) {
     const m = {
       'san roque':    LatLng(14.5832, 121.1719),
       'mambugan':     LatLng(14.6206, 121.1416),
@@ -369,6 +370,6 @@ class HazardAwareRoutingService {
       'san luis':     LatLng(14.6043, 121.1981),
       'santa cruz':   LatLng(14.6157, 121.1694),
     };
-    return m[barangay.toLowerCase()] ?? const LatLng(14.5832, 121.1719);
+    return m[barangay.toLowerCase()]; // null when not a known barangay
   }
 }

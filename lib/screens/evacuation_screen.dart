@@ -738,6 +738,10 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     final zones = <HazardZone>[];
 
     for (final a in alerts) {
+      // Skip dismissed/expired alerts — only active hazards belong on the map.
+      final active = (a['active'] as bool?) ?? true;
+      if (!active) continue;
+
       final severity = a['severity'] as String? ?? 'watch';
       // Show circles for all active hazard severities — severity only controls radius size
 
@@ -745,8 +749,11 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
           ?? (a['barangays'] is List && (a['barangays'] as List).isNotEmpty
               ? (a['barangays'] as List).first.toString()
               : '');
+      // No real coordinates and no recognized barangay → no point to place.
+      // Skip rather than dumping the alert onto the Antipolo city center.
       final center = HazardAwareRoutingService.extractLatLng(a)
           ?? _getBarangayCenter(barangayName.split(',').first.trim());
+      if (center == null) continue;
       final type = a['alertType'] as String? ?? a['type'] as String? ?? 'hazard';
       final barangayLabel = a['barangay'] as String?
           ?? (a['barangays'] is List ? (a['barangays'] as List).join(', ') : '');
@@ -822,7 +829,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     return [];
   }
 
-  LatLng _getBarangayCenter(String barangay) {
+  LatLng? _getBarangayCenter(String barangay) {
     const coords = {
       'san roque':    LatLng(14.5832, 121.1719),
       'mambugan':     LatLng(14.6206, 121.1416),
@@ -841,7 +848,7 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
       'san luis':     LatLng(14.6043, 121.1981),
       'santa cruz':   LatLng(14.6157, 121.1694),
     };
-    return coords[barangay.toLowerCase()] ?? _antipoloCenter;
+    return coords[barangay.toLowerCase()]; // null when not a known barangay
   }
 
   // ── Mapbox Directions helpers ──────────────
