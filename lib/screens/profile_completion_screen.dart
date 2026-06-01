@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sign_up.dart';
+import '../constants.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/hive_service.dart';
 import 'home_screen.dart';
+import 'terms_policy_screen.dart';
 
 class ProfileCompletionScreen extends StatefulWidget {
   final String token;
@@ -28,8 +30,10 @@ class _ProfileCompletionScreenState extends State<ProfileCompletionScreen> {
 
   String? _selectedBarangay;
   bool    _isLoading        = false;
+  bool    _agreedToTerms    = false;
   String? _barangayError;
   String? _streetDetailsError;
+  String? _termsError;
 
   bool _validateForm() {
     bool isValid = true;
@@ -38,8 +42,13 @@ class _ProfileCompletionScreenState extends State<ProfileCompletionScreen> {
       _streetDetailsError = _streetDetailsController.text.trim().isEmpty
           ? 'Street/Building details are required'
           : null;
+      _termsError         = _agreedToTerms
+          ? null
+          : 'You must agree to the Terms & Conditions and Privacy Policy to continue';
     });
-    if (_barangayError != null || _streetDetailsError != null) isValid = false;
+    if (_barangayError != null || _streetDetailsError != null || _termsError != null) {
+      isValid = false;
+    }
     return isValid;
   }
 
@@ -60,7 +69,11 @@ class _ProfileCompletionScreenState extends State<ProfileCompletionScreen> {
           'Content-Type':  'application/json',
           'Authorization': 'Bearer ${widget.token}',
         },
-        body: jsonEncode({'address': fullAddress}),
+        body: jsonEncode({
+          'address':       fullAddress,
+          'termsAccepted': true,
+          'termsVersion':  termsVersion,
+        }),
       );
 
       if (!mounted) return;
@@ -196,7 +209,21 @@ class _ProfileCompletionScreenState extends State<ProfileCompletionScreen> {
                 isRequired: false,
                 onChanged:  (field, value) {},
               ),
-              const SizedBox(height: 30),
+              const SizedBox(height: 24),
+              TermsAgreement(
+                value:      _agreedToTerms,
+                isLoading:  _isLoading,
+                errorText:  _termsError,
+                onChanged:  (v) => setState(() {
+                  _agreedToTerms = v;
+                  _termsError    = null;
+                }),
+                onTapTerms: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const TermsPolicyScreen()),
+                ),
+              ),
+              const SizedBox(height: 24),
               Container(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),

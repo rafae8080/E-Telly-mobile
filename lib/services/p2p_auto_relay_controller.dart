@@ -56,10 +56,33 @@ class P2PAutoRelayController {
       await InternetCheckerService.instance.forceFlushIfOnline();
       _refreshPendingCount();
       _setStatus('Upload complete.');
+    } else if (isActiveNotifier.value) {
+      // Already advertising/scanning — a previous report activated the relay.
+      // Don't just sit idle: kick a fresh relay cycle so this new report is
+      // sent without the user having to Stop/Start the relay.
+      debugPrint('[AutoRelay] Already active — kicking relay cycle for new report.');
+      _resetAutoStopTimer();
+      _kickRelayCycle();
     } else {
       debugPrint('[AutoRelay] No connectivity — activating P2P relay.');
       await _activate();
     }
+  }
+
+  /// Re-arms the select → connect path for a newly queued report while the
+  /// relay is already running. Peers are already discovered, so no new
+  /// `_onEndpointFound` fires; without this the report would wait until the
+  /// user manually restarted the relay. If no peers are in range yet,
+  /// discovery is still running and [_onPeerDiscovered] will pick it up.
+  void _kickRelayCycle() {
+    if (_ownSuffix != ConnectivitySuffix.offline) return; // connected → uploads directly
+    if (_isConnecting) return;
+    if (_selectTimer?.isActive ?? false) return;
+    if (!RelayQueueManager.hasRelayableReports) return;
+    if (P2PRelayService.instance.peers.isEmpty) return;
+
+    _setStatus('New report queued — finding a device…');
+    _selectTimer = Timer(_selectWindow, _selectAndConnect);
   }
 
   /// Manually starts P2P advertising and discovery regardless of connectivity.

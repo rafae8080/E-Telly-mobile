@@ -4,7 +4,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import '../widgets/sign_up.dart';
 import '../services/api_service.dart';
+import '../constants.dart';
 import 'email_verification_screen.dart';
+import 'terms_policy_screen.dart';
 
 class SignUpScreen extends StatefulWidget {
   final VoidCallback? onSignUpSuccess;
@@ -33,6 +35,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
   bool _showPassword        = false;
   bool _showConfirmPassword = false;
   bool _isLoading           = false;
+  bool _agreedToTerms       = false;
   String? _selectedBarangay;
 
   String? _nameError;
@@ -41,6 +44,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
   String? _confirmPasswordError;
   String? _barangayError;
   String? _streetDetailsError;
+  String? _termsError;
 
   bool _isStrongPassword(String password) {
     if (password.length < 8) return false;
@@ -94,6 +98,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
       isValid = false;
     }
 
+    if (!_agreedToTerms) {
+      errors['terms'] = 'You must agree to the Terms & Conditions and Privacy Policy to continue';
+      isValid = false;
+    }
+
     setState(() {
       _nameError            = errors['name'];
       _emailError           = errors['email'];
@@ -101,6 +110,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
       _streetDetailsError   = errors['streetDetails'];
       _passwordError        = errors['password'];
       _confirmPasswordError = errors['confirmPassword'];
+      _termsError           = errors['terms'];
     });
 
     return isValid;
@@ -136,9 +146,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
         Uri.parse('${ApiService.baseUrl}/api/auth/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'idToken': idToken,
-          'name':    _nameController.text.trim(),
-          'address': fullAddress,
+          'idToken':       idToken,
+          'name':          _nameController.text.trim(),
+          'address':       fullAddress,
+          'termsAccepted': true,
+          'termsVersion':  termsVersion,
         }),
       );
 
@@ -370,6 +382,20 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   errorText:        _confirmPasswordError,
                   isLoading:        _isLoading,
                   onChanged:        _updateField,
+                ),
+                const SizedBox(height: 20),
+                TermsAgreement(
+                  value:      _agreedToTerms,
+                  isLoading:  _isLoading,
+                  errorText:  _termsError,
+                  onChanged:  (v) => setState(() {
+                    _agreedToTerms = v;
+                    _termsError    = null;
+                  }),
+                  onTapTerms: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const TermsPolicyScreen()),
+                  ),
                 ),
                 const SizedBox(height: 25),
                 SignUpButton(isLoading: _isLoading, onPressed: _handleSignUp),

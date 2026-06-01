@@ -84,6 +84,11 @@ class P2PRelayService {
 
   final Map<String, PeerDevice> _peers = {};
 
+  /// Endpoints we initiated a connection to (via [connectAndSend]). Only the
+  /// initiator drives the transfer + disconnect; the accepting (inbound) side
+  /// just listens, so it never tears down an incoming transfer prematurely.
+  final Set<String> _outboundEndpoints = {};
+
   // ── Callbacks (set by the UI layer) ──────────────────────────────────────────
 
   /// Called whenever the peer list changes (device found / lost / state change).
@@ -167,6 +172,7 @@ class P2PRelayService {
       await Nearby().stopAllEndpoints();
     } catch (_) {}
     _peers.clear();
+    _outboundEndpoints.clear();
     _isRunning = false;
     debugPrint('[P2P] Stopped.');
   }
@@ -178,6 +184,7 @@ class P2PRelayService {
     if (peer == null) return;
 
     _updatePeerState(endpointId, PeerState.connecting);
+    _outboundEndpoints.add(endpointId);
 
     try {
       await Nearby().requestConnection(
@@ -190,6 +197,7 @@ class P2PRelayService {
       // Actual sending happens in _onConnectionResult once accepted
     } catch (e) {
       debugPrint('[P2P] Connection request failed: $e');
+      _outboundEndpoints.remove(endpointId);
       _updatePeerState(endpointId, PeerState.discovered);
       onTransferProgress?.call(TransferProgress(
         state: TransferState.error,
@@ -204,6 +212,7 @@ class P2PRelayService {
     try {
       await Nearby().disconnectFromEndpoint(endpointId);
     } catch (_) {}
+    _outboundEndpoints.remove(endpointId);
     _updatePeerState(endpointId, PeerState.disconnected);
   }
 
@@ -245,8 +254,21 @@ class P2PRelayService {
     debugPrint('[P2P] Connection result for $endpointId: $status');
     if (status == Status.CONNECTED) {
       _updatePeerState(endpointId, PeerState.connected);
-      _sendPendingReports(endpointId);
+      // Only the side that initiated the connection sends + drives the
+      // disconnect. The accepting (inbound) side just listens; the sender
+      // closes the link once it has sent __DONE__. This avoids the receiver
+      // tearing down an incoming transfer and the dedup ping-pong that
+      // happened when both sides ran _sendPendingReports.
+      if (_outboundEndpoints.contains(endpointId)) {
+        _sendPendingReports(endpointId);
+      } else {
+        onTransferProgress?.call(const TransferProgress(
+          state: TransferState.receiving,
+          message: 'Connected. Receiving reports…',
+        ));
+      }
     } else {
+      _outboundEndpoints.remove(endpointId);
       _updatePeerState(endpointId, PeerState.discovered);
       onTransferProgress?.call(const TransferProgress(
         state: TransferState.error,
@@ -258,6 +280,7 @@ class P2PRelayService {
 
   void _onDisconnected(String endpointId) {
     debugPrint('[P2P] Disconnected from $endpointId');
+    _outboundEndpoints.remove(endpointId);
     _updatePeerState(endpointId, PeerState.disconnected);
     onRelayCycleComplete?.call();
   }
@@ -338,16 +361,21 @@ class P2PRelayService {
   // ── Sending logic ────────────────────────────────────────────────────────────
 
   Future<void> _sendPendingReports(String endpointId) async {
-    final pending = RelayQueueManager.getPending()
-        .where((e) => e.hopCount < _maxHops)
-        .toList();
+    final allPending = RelayQueueManager.getPending();
+    final pending =
+        allPending.where((e) => e.hopCount < _maxHops).toList();
 
     if (pending.isEmpty) {
-      onTransferProgress?.call(const TransferProgress(
+      // Distinguish a genuinely empty queue from one where every report has
+      // already reached the hop limit — they are very different situations.
+      final message = allPending.isEmpty
+          ? 'No reports to send right now.'
+          : 'Reports reached the relay hop limit.';
+      onTransferProgress?.call(TransferProgress(
         state: TransferState.done,
         total: 0,
         current: 0,
-        message: 'No eligible reports (hop limit reached or queue empty).',
+        message: message,
       ));
       await disconnect(endpointId);
       onRelayCycleComplete?.call();

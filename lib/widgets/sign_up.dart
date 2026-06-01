@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 const List<Map<String, String>> antipoloBarangays = [
@@ -464,6 +465,91 @@ class SignUpButton extends StatelessWidget {
                 ),
               ),
       ),
+    );
+  }
+}
+
+class TermsAgreement extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final VoidCallback onTapTerms;
+  final String? errorText;
+  final bool isLoading;
+
+  const TermsAgreement({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    required this.onTapTerms,
+    required this.isLoading,
+    this.errorText,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bool enabled = !isLoading;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 24,
+              height: 24,
+              child: Checkbox(
+                value: value,
+                onChanged: enabled ? (v) => onChanged(v ?? false) : null,
+                activeColor: const Color(0xFFDC2626),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+                side: BorderSide(
+                  color: errorText != null
+                      ? const Color(0xFFDC2626)
+                      : const Color(0xFF9CA3AF),
+                  width: 1.5,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: RichText(
+                  text: TextSpan(
+                    style: const TextStyle(fontSize: 14, color: Colors.black, height: 1.4),
+                    children: [
+                      const TextSpan(text: 'I have read and agree to the '),
+                      TextSpan(
+                        text: 'Terms & Conditions and Privacy Policy',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFFDC2626),
+                          decoration: TextDecoration.underline,
+                          decorationColor: Color(0xFFDC2626),
+                        ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = enabled ? onTapTerms : null,
+                      ),
+                      const TextSpan(text: '.'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (errorText != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            errorText!,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Color(0xFFDC2626),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

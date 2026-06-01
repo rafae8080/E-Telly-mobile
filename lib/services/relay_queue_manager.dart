@@ -305,7 +305,10 @@ class RelayQueueManager {
     return {
       ...entry.report,
       'relayChain': entry.relayChain,
-      'relayHops': entry.hopCount,
+      // +1 reflects the hop the receiver is about to take. Sending the
+      // pre-increment value left every node storing the previous hop number,
+      // so the hop count never grew and the hop limit was never enforced.
+      'relayHops': entry.hopCount + 1,
       'relayStatus': entry.status.name,
     };
   }
