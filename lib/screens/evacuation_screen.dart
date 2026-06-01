@@ -82,11 +82,25 @@ class EvacuationCenter {
           : (json['currentOccupancy'] as num).toInt();
     }
 
-    String statusValue = 'available';
-    if (json['available'] != null) {
-      statusValue = json['available'] == true ? 'available' : 'full';
-    } else if (json['status'] != null) {
+    int capacity = json['capacity'] is int
+        ? json['capacity']
+        : (json['capacity'] ?? 100).toInt();
+
+    // Status is derived from BOTH the admin availability flag and live occupancy,
+    // so a center filled to capacity becomes 'full' (and thus non-navigable) even
+    // when the admin hasn't manually toggled it unavailable.
+    final bool adminUnavailable = json['available'] == false;
+    String statusValue;
+    if (adminUnavailable) {
+      statusValue = 'full';
+    } else if (capacity > 0 && occupancy >= capacity) {
+      statusValue = 'full';
+    } else if (capacity > 0 && occupancy / capacity >= 0.8) {
+      statusValue = 'almost_full';
+    } else if (json['available'] == null && json['status'] != null) {
       statusValue = json['status'].toString();
+    } else {
+      statusValue = 'available';
     }
 
     double lat = 14.5865;
@@ -107,9 +121,7 @@ class EvacuationCenter {
       id: json['_id'].toString(),
       name: json['name'] ?? 'Unknown Center',
       address: addressValue,
-      capacity: json['capacity'] is int
-          ? json['capacity']
-          : (json['capacity'] ?? 100).toInt(),
+      capacity: capacity,
       currentOccupancy: occupancy,
       status: statusValue,
       contact: json['contact']?.toString() ?? 'N/A',
@@ -1103,6 +1115,13 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
   // ── Navigation ─────────────────────────────
 
   Future<void> _startEvacuation(EvacuationCenter center) async {
+    // Single gate covering every navigation entry point (card, bottom sheet,
+    // list item, suggested card): a full center cannot be navigated to.
+    if (center.status == 'full') {
+      _showErrorDialog(
+          'This center is full. Please choose another evacuation center.');
+      return;
+    }
     if (_currentLocation == null) {
       _showErrorDialog('Please wait for your location to load.');
       return;
@@ -1639,8 +1658,16 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
     );
   }
 
+  // A center has a dialable hotline only when the backend supplied a number.
+  bool _hasContact(EvacuationCenter c) =>
+      c.contact.trim().isNotEmpty && c.contact.trim().toUpperCase() != 'N/A';
+
   Future<void> _makeCall(String contact) async {
     final cleanNumber = contact.replaceAll(RegExp(r'[^\d+]'), '');
+    if (cleanNumber.isEmpty) {
+      _showErrorDialog('No hotline available for this center.');
+      return;
+    }
     final url = Uri.parse('tel:$cleanNumber');
     if (await canLaunchUrl(url)) {
       await launchUrl(url);
@@ -1734,10 +1761,12 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _makeCall(center.contact);
-                      },
+                      onPressed: _hasContact(center)
+                          ? () {
+                              Navigator.pop(context);
+                              _makeCall(center.contact);
+                            }
+                          : null,
                       icon: const Icon(Icons.phone, size: 18),
                       label: const Text('Call'),
                       style: OutlinedButton.styleFrom(
@@ -1749,12 +1778,15 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
                   Expanded(
                     flex: 2,
                     child: ElevatedButton.icon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _startEvacuation(center);
-                      },
+                      onPressed: center.status == 'full'
+                          ? null
+                          : () {
+                              Navigator.pop(context);
+                              _startEvacuation(center);
+                            },
                       icon: const Icon(Icons.emergency, size: 18),
-                      label: const Text('Start Navigation'),
+                      label: Text(
+                          center.status == 'full' ? 'Center Full' : 'Start Navigation'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red,
                         foregroundColor: Colors.white,
@@ -1982,14 +2014,23 @@ class _EvacuationScreenState extends State<EvacuationScreen> {
               Column(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.emergency, color: Colors.red),
-                    tooltip: 'Navigate',
-                    onPressed: () => _startEvacuation(center),
+                    icon: Icon(Icons.emergency,
+                        color: center.status == 'full'
+                            ? Colors.grey
+                            : Colors.red),
+                    tooltip: center.status == 'full' ? 'Center full' : 'Navigate',
+                    onPressed: center.status == 'full'
+                        ? null
+                        : () => _startEvacuation(center),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.phone, color: Colors.blue),
-                    tooltip: 'Call',
-                    onPressed: () => _makeCall(center.contact),
+                    icon: Icon(Icons.phone,
+                        color:
+                            _hasContact(center) ? Colors.blue : Colors.grey),
+                    tooltip: _hasContact(center) ? 'Call' : 'No hotline',
+                    onPressed: _hasContact(center)
+                        ? () => _makeCall(center.contact)
+                        : null,
                   ),
                 ],
               ),

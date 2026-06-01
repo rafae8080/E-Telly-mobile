@@ -263,6 +263,10 @@ class EvacuationCenterCard extends StatelessWidget {
     this.hazardLabel,
   });
 
+  bool get _hasContact =>
+      center.contact.trim().isNotEmpty &&
+      center.contact.trim().toUpperCase() != 'N/A';
+
   @override
   Widget build(BuildContext context) {
     final occupancyPercent = (center.currentOccupancy / center.capacity) * 100;
@@ -479,11 +483,12 @@ class EvacuationCenterCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: OutlinedButton(
-                  onPressed: onCall,
+                  onPressed: _hasContact ? onCall : null,
                   style: OutlinedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: statusColor,
-                    side: BorderSide(color: statusColor),
+                    side: BorderSide(
+                        color: _hasContact ? statusColor : Colors.grey[300]!),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),

@@ -328,8 +328,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Location Services Required'),
-        content:
-            const Text('Please enable GPS/location services so neighbors know where to bring help.'),
+        content: const Text(
+            'Please enable GPS/location services so neighbors know where to bring help.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -478,9 +478,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               Text(
                 category.label,
                 style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: catColor),
+                    fontSize: 16, fontWeight: FontWeight.bold, color: catColor),
               ),
             ],
           ),
@@ -563,7 +561,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.location_on, color: ET_BLUE),
+                  const Icon(Icons.location_on, color: ET_RED),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -604,17 +602,17 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           child: ElevatedButton(
             onPressed: _handleSubmitRequest,
             style: ElevatedButton.styleFrom(
-              backgroundColor: ET_BLUE,
+              backgroundColor: ET_RED,
               foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 16),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
               ),
             ),
             child: const Text(
               'SUBMIT REQUEST',
               style: TextStyle(
-                fontSize: 16,
+                fontSize: 14,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -753,12 +751,21 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showCategoryPickerSheet,
-        icon: const Icon(Icons.add),
-        label: const Text('Request Resources'),
-        backgroundColor: ET_BLUE,
-      ),
+      floatingActionButton: _showModal
+          ? null
+          : SizedBox(
+              height: 40,
+              child: FloatingActionButton.extended(
+                onPressed: _showCategoryPickerSheet,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Request Resources',
+                    style: TextStyle(fontSize: 13, color: Colors.white)),
+                extendedPadding: const EdgeInsets.symmetric(horizontal: 12),
+                backgroundColor: ET_RED,
+                foregroundColor: Colors.white,
+                elevation: 2,
+              ),
+            ),
       body: Stack(
         children: [
           SingleChildScrollView(
@@ -781,7 +788,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 getCategoryColor: _getCategoryColor,
                 getCategoryName: _getCategoryName,
                 onClose: () => setState(() => _showModal = false),
-                onQuantityChanged: (qty) => setState(() => _requestQuantity = qty),
+                onQuantityChanged: (qty) =>
+                    setState(() => _requestQuantity = qty),
                 onUrgentChanged: (_) {},
                 onNotesChanged: (text) => _requestDescription = text,
                 onSubmit: _handleSubmitRequest,
@@ -803,25 +811,25 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: [ET_BLUE.withOpacity(0.08), ET_PURPLE.withOpacity(0.06)],
+              colors: [ET_RED.withOpacity(0.08), ET_RED.withOpacity(0.06)],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: ET_BLUE.withOpacity(0.2)),
+            border: Border.all(color: ET_RED.withOpacity(0.2)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Row(
                 children: [
-                  Icon(Icons.people_alt, color: ET_BLUE, size: 20),
+                  Icon(Icons.people_alt, color: ET_RED, size: 20),
                   SizedBox(width: 8),
                   Text('Community Resource Sharing',
                       style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
-                          color: ET_BLUE)),
+                          color: ET_RED)),
                 ],
               ),
               const SizedBox(height: 6),
@@ -835,9 +843,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         const SizedBox(height: 16),
         _communityNavCard(
           icon: Icons.people_alt,
-          color: ET_BLUE,
+          color: ET_RED,
           title: 'People in Need',
-          subtitle: 'See open resource requests from your barangay and offer to help',
+          subtitle:
+              'See open resource requests from your barangay and offer to help',
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(builder: (_) => const CommunityBoardScreen()),
@@ -846,7 +855,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         const SizedBox(height: 10),
         _communityNavCard(
           icon: Icons.inventory_2,
-          color: ET_PURPLE,
+          color: ET_RED,
           title: 'My Requests',
           subtitle:
               'Track your posted requests and review offers from neighbors',
@@ -858,7 +867,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         const SizedBox(height: 10),
         _communityNavCard(
           icon: Icons.handshake,
-          color: ET_GREEN,
+          color: ET_RED,
           title: 'My Pledges',
           subtitle: 'See requests you\'ve offered to help with',
           onTap: () => Navigator.push(

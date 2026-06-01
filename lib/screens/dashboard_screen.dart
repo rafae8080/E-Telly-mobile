@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'package:e_telly_app/widgets/custom_font.dart';
 import 'package:flutter/material.dart';
 import '../constants.dart';
 import '../widgets/actions.dart';
 import '../widgets/emergency_contacts.dart';
 import '../services/p2p_auto_relay_controller.dart';
+import '../services/alert_service.dart';
+import '../services/notification_service.dart';
 import '../screens/p2p_relay_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -16,6 +19,41 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  final AlertService _alertService = AlertService();
+  int _unreadAlerts = 0;
+  StreamSubscription<String>? _fcmSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshUnreadCount();
+    // Keep the badge in sync when an alert notification arrives.
+    _fcmSub = onFcmRouteReceived.listen((route) {
+      if (route == 'alerts') _refreshUnreadCount();
+    });
+  }
+
+  @override
+  void dispose() {
+    _fcmSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshUnreadCount() async {
+    try {
+      final alerts = await _alertService.fetchAlerts();
+      var count = 0;
+      for (final a in alerts) {
+        final active = (a['active'] as bool?) ?? true;
+        final read = (a['read'] as bool?) ?? false;
+        if (active && !read) count++;
+      }
+      if (mounted) setState(() => _unreadAlerts = count);
+    } catch (_) {
+      // Non-critical — leave the previous count.
+    }
+  }
+
   // Quick Actions Data
   final List<QuickAction> _quickActions = [
     QuickAction(
@@ -299,14 +337,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.start,
             children: [
-              Container(
-                width: 70,
-                height: 70,
-                decoration: BoxDecoration(
-                  color: action.color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(action.icon, size: 35, color: action.color),
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    width: 70,
+                    height: 70,
+                    decoration: BoxDecoration(
+                      color: action.color.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(action.icon, size: 35, color: action.color),
+                  ),
+                  if (action.id == 'alerts' && _unreadAlerts > 0)
+                    Positioned(
+                      top: -4,
+                      right: -4,
+                      child: Container(
+                        constraints: const BoxConstraints(
+                            minWidth: 20, minHeight: 20),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 5),
+                        decoration: BoxDecoration(
+                          color: ET_RED,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white, width: 1.5),
+                        ),
+                        child: Center(
+                          child: Text(
+                            _unreadAlerts > 9 ? '9+' : '$_unreadAlerts',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 6),
               Expanded(
@@ -521,7 +590,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       final route = routeMapping[actionId];
       if (route != null) {
-        Navigator.pushNamed(context, route);
+        // Recompute the unread badge when the user returns from the alerts
+        // screen (where they may have read or dismissed alerts).
+        Navigator.pushNamed(context, route).then((_) {
+          if (actionId == 'alerts') _refreshUnreadCount();
+        });
       }
     }
   }

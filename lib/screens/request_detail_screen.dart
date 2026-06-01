@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import '../constants.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import 'request_chat_screen.dart';
 
 class RequestDetailScreen extends StatefulWidget {
@@ -16,6 +18,9 @@ class RequestDetailScreen extends StatefulWidget {
 
 class _RequestDetailScreenState extends State<RequestDetailScreen> {
   final ApiService _api = ApiService();
+  final AuthService _auth = AuthService();
+  IO.Socket? _socket;
+  String? _userId;
 
   Map<String, dynamic>? _request;
   Map<String, dynamic>? _myPledge;
@@ -27,11 +32,51 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
     super.initState();
     _request = widget.initialData;
     _loadAndCheck();
+    _initSocket();
+  }
+
+  @override
+  void dispose() {
+    _socket?.disconnect();
+    _socket?.dispose();
+    super.dispose();
   }
 
   Future<void> _loadAndCheck() async {
     await _checkMyPledgeStatus();
     if (mounted) setState(() { _loading = false; });
+  }
+
+  /// Live updates so this view reflects the requester's decision the moment it
+  /// happens — when our pledge is accepted or declined (another helper chosen),
+  /// or the request's status changes — without the pledger doing anything.
+  /// Mirrors the community board's socket setup.
+  Future<void> _initSocket() async {
+    _userId = await _auth.getUserId();
+    _socket = IO.io(
+      ApiService.baseUrl,
+      IO.OptionBuilder()
+          .setTransports(['websocket'])
+          .disableAutoConnect()
+          .build(),
+    );
+    _socket!.connect();
+    _socket!.onConnect((_) {
+      if (_userId != null) _socket!.emit('join', {'userId': _userId});
+    });
+    _socket!.on('pledge_accepted', (_) {
+      if (mounted) _checkMyPledgeStatus();
+    });
+    _socket!.on('pledge_declined', (_) {
+      if (!mounted) return;
+      _checkMyPledgeStatus();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Another helper was chosen. Thank you for offering!')),
+      );
+    });
+    _socket!.on('community_request_updated', (_) {
+      if (mounted) _checkMyPledgeStatus();
+    });
   }
 
   Future<void> _checkMyPledgeStatus() async {
@@ -242,7 +287,12 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
                   ),
                 ),
               )
-            else if (isOpen && hasPledge) ...[
+            else if (pledgeStatus == 'declined')
+              const _StatusBox(
+                message: 'Another helper was chosen for this request. Your offer is now closed.',
+                color: ET_GRAY,
+              )
+            else if (isOpen && hasPledge && pledgeStatus == 'pending') ...[
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(14),

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:e_telly_app/services/api_service.dart';
 import 'package:e_telly_app/services/hive_service.dart';
+import 'package:e_telly_app/utils/alert_presentation.dart';
 
 class AlertService {
 
@@ -18,6 +19,18 @@ class AlertService {
         for (final item in raw) {
           final alert = _convertAlert(Map<String, dynamic>.from(item as Map));
           if (alert != null) converted.add(alert);
+        }
+
+        // Preserve read/unread state across refreshes. _convertAlert always
+        // sets read:false for freshly fetched alerts, so without this merge a
+        // refresh would wipe the user's "read" marks (and reset the badge).
+        final prior = await HiveService.getCachedAlerts();
+        final readMap = <String, bool>{
+          for (final p in prior)
+            (p['id'] ?? '').toString(): (p['read'] as bool?) ?? false,
+        };
+        for (final c in converted) {
+          c['read'] = readMap[(c['id'] ?? '').toString()] ?? false;
         }
 
         await HiveService.cacheAlerts(converted);
@@ -40,7 +53,9 @@ class AlertService {
     try {
       final id = (alert['_id'] ?? alert['id'] ?? '').toString();
 
-      // Severity mapping
+      // Severity mapping. `rawSeverity` (watch/warning/critical/evacuate) is the
+      // PAGASA-derived band kept for the resident presentation layer; `severity`
+      // is the legacy collapsed value still used for card styling fallbacks.
       final rawSeverity = (alert['severity'] ?? 'watch') as String;
       final String severity;
       switch (rawSeverity) {
@@ -55,9 +70,11 @@ class AlertService {
           severity = 'moderate';
       }
 
+      final rawType = (alert['type'] ?? 'other') as String;
+
       // Type mapping
       final String mappedType;
-      switch ((alert['type'] ?? 'other') as String) {
+      switch (rawType) {
         case 'flood':      mappedType = 'flood';       break;
         case 'river':      mappedType = 'water_level'; break;
         case 'rainfall':   mappedType = 'rain';        break;
@@ -77,25 +94,43 @@ class AlertService {
           ? DateTime.tryParse(alert['createdAt'] as String) ?? DateTime.now()
           : DateTime.now();
 
+      final source = (alert['source'] ?? 'system') as String;
+      final isManual = (alert['isManual'] ?? false) as bool;
+      final officialDetail = (alert['description'] ?? '') as String;
+
+      // Auto/system alerts carry a CDRRMO-grade technical description. Replace it
+      // with a plain, resident-friendly line (faithful to the PAGASA severity).
+      // Manual operator alerts already read plainly — keep their message as-is.
+      final isAuto = AlertPresentation.isAutoAlert(source, isManual);
+      final message = isAuto
+          ? AlertPresentation.residentMessage(rawType, rawSeverity)
+          : (officialDetail.isNotEmpty
+              ? officialDetail
+              : 'No description provided');
+
       return {
         'id': id,
         'type': mappedType,
+        'rawType': rawType,
+        'rawSeverity': rawSeverity,
+        'isManual': isManual,
         'title': alert['title'] ?? 'Alert',
-        'message': alert['description'] ?? 'No description provided',
+        'message': message,
+        'officialDetail': officialDetail,
         'barangay': barangayText,
         'timestamp': _timeAgo(createdAt),
         'severity': severity,
         'active': alert['isActive'] ?? true,
         'read': false,
-        'waterLevel': _extractWaterLevel(alert['description'] ?? ''),
+        'waterLevel': _extractWaterLevel(officialDetail),
         'evacuationCenter': null,
-        'source': alert['source'] ?? 'system',
+        'source': source,
         'location': alert['location'] ?? '',
         'createdAt': createdAt.toIso8601String(),
         'expiresAt': alert['expiresAt'] as String?,
         'lat': alert['lat'],
         'lng': alert['lng'],
-        'alertType': alert['type'] ?? 'other',
+        'alertType': rawType,
       };
     } catch (e) {
       print('[AlertService] Convert error: $e — $alert');
