@@ -447,6 +447,101 @@ which neighbor is closest to having real internet.
 > screen to make itself discoverable so offline neighbors can dump their reports onto it
 > (`startManualRelay`). See `lib/screens/p2p_relay_screen.dart`.
 
+#### e) Who actually uploads? — “handing off transfers ownership”
+
+A natural question: *“If a report passed through 3 phones, and one of them gets internet, do all
+three upload it (creating duplicates)? Or does the original sender upload it once they reconnect?”*
+
+The answer is **neither** — only **the phone currently holding the report uploads it**, and that is
+always the **last** phone in the chain. This is controlled by the report’s **status** in the queue
+(`relay_queue_manager.dart`):
+
+```
+  status: pending   → I am holding this; I will upload it when I get signal.
+  status: relayed   → I passed it on; it's someone else's job now — I STOP trying.
+  status: uploaded  → it reached the server. Done.
+```
+
+The moment a phone successfully sends a report to a peer, it marks its own copy **`relayed`**
+(`markAsRelayed`, hop count +1). The auto‑uploader (`InternetCheckerService`) only ever looks at
+**`pending`** reports (`getPending()` returns `pending` + retryable `failed` — **never `relayed`**).
+So a phone that already handed a report off will **not** upload it again, even if its internet comes
+back first. The phone that *received* it stores a fresh copy as **`pending`**, so the responsibility
+moves forward with the report.
+
+**Worked example — A ➜ B ➜ C (you are B):**
+
+```
+  Phone A  ──sends to──►  Phone B (you)  ──sends to──►  Phone C
+   copy = relayed          copy = relayed                copy = pending
+   ✗ won't upload          ✗ won't upload                ✓ WILL upload
+```
+
+| If internet returns first to… | Does that phone upload the report? | Why |
+|-------------------------------|-----------------------------------|-----|
+| **A** (original reporter) | ❌ No | A already relayed to B → A’s copy is `relayed`. |
+| **B** (you, the middle hop) | ❌ No | B already relayed to C → B’s copy is `relayed`. |
+| **C** (the last holder) | ✅ Yes | C never passed it on → C’s copy is still `pending`. |
+
+This is **deliberate**: it guarantees the report is uploaded **exactly once** with no duplicate
+storm, because at any moment only one phone holds it in an uploadable (`pending`) state. In the
+**automatic** relay this is also safe, because a phone only relays *toward* a better‑connected peer
+(`_ONLINE > _LOCAL > _OFFLINE`), and the receiver uploads the instant it has signal
+(`_onReportsReceived` → `forceFlushIfOnline`). The trade‑off (when this assumption breaks) is spelled
+out in §9, limitation #11.
+
+#### f) What the relay is built on (and why this package, not another)
+
+The phone‑to‑phone mesh does **not** talk to the radios directly. It uses the **`nearby_connections`**
+Flutter plugin (`pubspec.yaml`, v4.3.0), which is a thin Dart wrapper around **Google’s Nearby
+Connections API** — a component that ships inside **Google Play Services** on every standard Android
+phone.
+
+```
+  E-Telly app (Dart)              lib/services/p2p_relay_service.dart
+        │  imports
+        ▼
+  nearby_connections  (Flutter plugin, v4.3.0)      ← thin Dart wrapper
+        │  calls through to
+        ▼
+  Google Nearby Connections API                     ← the real "mesh engine"
+        │  ships inside
+        ▼
+  Google Play Services  (com.google.android.gms)    ← Google system component
+        │  drives the actual radios
+        ▼
+  Bluetooth  +  Bluetooth LE  +  WiFi Direct / hotspot   ← open hardware standards
+```
+
+So to be precise for a panel: the **radios are open hardware standards** (Bluetooth, WiFi Direct) in
+every Android phone — but the **auto‑forming, self‑switching mesh** E‑Telly relies on is **Google’s
+Nearby Connections API**, not something we wrote by hand. Two consequences: it needs **Google Play
+Services present** (true on virtually all consumer Android phones, but not on some custom ROMs /
+Huawei devices), and it has **no iOS equivalent** — the main reason the relay is Android‑only
+(§9, #1).
+
+**Why `nearby_connections` and not another P2P package?** We surveyed the well‑known Flutter options:
+
+| Flutter package | Underlying tech | Auto discovery + mesh? | Bluetooth **and** WiFi? | Works with NO infrastructure? | Why we didn’t use it |
+|-----------------|-----------------|------------------------|-------------------------|-------------------------------|----------------------|
+| **`nearby_connections` (chosen)** | Google Nearby Connections (`P2P_CLUSTER`) | ✅ Built‑in many‑to‑many | ✅ Auto‑switches BT/BLE/WiFi Direct | ✅ Zero infra needed | **—** Best fit: auto mesh, big payloads (photos), full control over the connectivity‑tagged routing protocol |
+| `flutter_nearby_connections` | Google Nearby (Android) + Multipeer (iOS) | ⚠️ Session‑based, less control | ✅ | ✅ | Cross‑platform, but a thinner, session‑oriented API — less control over peer selection / the `_ONLINE/_LOCAL/_OFFLINE` scoring and the `__COUNT__/__DONE__` payload protocol we needed |
+| `flutter_p2p_connection` | Raw **WiFi Direct** only | ❌ Manual group‑owner negotiation | ❌ WiFi Direct only | ✅ | No Bluetooth fallback; manual connection setup; fails when WiFi Direct is flaky between mixed devices |
+| `flutter_blue_plus` / `flutter_reactive_ble` | **Bluetooth LE** (GATT) only | ❌ Point‑to‑point | ❌ BLE only | ✅ | BLE throughput is tiny — bad for photo reports; you must hand‑build discovery, chunking, and the whole mesh yourself |
+| `flutter_bluetooth_serial` | **Classic Bluetooth** (RFCOMM) | ❌ Manual pairing | ❌ Bluetooth only | ✅ | Requires manual device pairing; no WiFi speed; no auto‑discovery — unusable in a crowd during a disaster |
+| `nsd` / `multicast_dns` / `bonsoir` | mDNS / Bonjour service discovery | ⚠️ Discovery only, no transport | n/a | ❌ **Needs a shared WiFi/LAN** | Assumes an existing network — exactly the thing that is down in the offline scenario this feature exists for |
+
+**Verdict — why the chosen one is best for *this* problem:** the relay’s whole job is to move a
+**photo‑bearing report** between strangers’ phones **when all infrastructure is down**, picking the
+neighbor closest to the internet. That demands three things at once: (1) **automatic many‑to‑many
+discovery + connection** with no manual pairing, (2) **both Bluetooth *and* WiFi Direct**, switched
+automatically for range vs. speed, and (3) enough **payload size and protocol control** to send the
+`__COUNT__ → reports → __DONE__` batch and the `_ONLINE/_LOCAL/_OFFLINE` connectivity tags. Only
+`nearby_connections` (Google’s `P2P_CLUSTER`) gives all three out of the box. The cross‑platform
+alternatives trade away the fine‑grained control we built the routing logic on, and the BLE/classic‑BT
+/ WiFi‑Direct‑only packages each drop one of the three must‑haves. (The price we accept is the
+Android‑only / Play‑Services dependency above.)
+
 ---
 
 ### 6.3 Hazard‑Aware Evacuation Routing — Deep Dive (Mapbox)
@@ -796,7 +891,7 @@ etelly-mobile/
 > Stated honestly — these are the realistic boundaries and known trade‑offs.
 
 ### Platform & device
-1. **Android‑only in practice.** P2P relay (Nearby Connections) and the SSID/manifest setup target Android; iOS is not wired up. `device_info_plus` reads **Android** info only.
+1. **Android‑only in practice.** P2P relay (Nearby Connections) and the SSID/manifest setup target Android; iOS is not wired up. `device_info_plus` reads **Android** info only. **Why it’s built this way:** (a) the **Nearby Connections** API — the heart of the phone‑to‑phone mesh — is a **Google Play Services** library, so its Bluetooth + WiFi‑Direct `P2P_CLUSTER` mesh has **no iOS equivalent**; Apple’s closest tech (Multipeer Connectivity) is a different API that would need a separate native implementation. (b) Reading the **WiFi SSID** to detect the barangay `ETelly-` network is straightforward on Android (with location permission) but is **heavily restricted on iOS**. (c) The permission and radio setup lives in the **Android `AndroidManifest.xml`** (Bluetooth scan/advertise/connect, nearby WiFi, cleartext traffic) with no iOS counterpart wired up. (d) The user base is Antipolo residents, where **Android dominates**, so targeting Android first delivers the offline‑mesh value to the most people for the least effort. iOS support is listed as future work (§10, Q19).
 2. **P2P needs nearby people.** The phone‑to‑phone mesh only works if **other E‑Telly users are physically within Bluetooth/WiFi range** (tens of meters). In a sparsely populated area with no signal, a report may sit in the queue until someone passes by.
 3. **P2P range & battery.** Continuous advertising/scanning drains battery; the app auto‑stops after 10 minutes of inactivity, which can also mean a relay opportunity is missed if it happens later.
 
@@ -810,11 +905,12 @@ etelly-mobile/
 8. **Direct‑MongoDB fallback is sensitive.** The app can connect straight to MongoDB Atlas; the connection string lives in `.env` and Atlas IP‑whitelisting must be configured. The direct login query compares the password field directly (`mongodb.dart`) — backend‑mediated auth is the secure path and should be preferred.
 9. **Local barangay server is hard‑coded** to specific IPs (`192.168.137.1`, `192.168.1.100`) and an `ETelly-` WiFi name prefix; a different network layout needs config changes.
 10. **No guaranteed delivery offline.** A queued report is delivered on a *best‑effort* basis; until a phone with connectivity is reached, it is not on the server.
+11. **Relaying hands off ownership — the original sender will not “take it back.”** Once a phone passes a report to a peer, it marks its own copy `relayed` and **stops trying to upload it**; only the phone currently holding a `pending` copy (the last hop) uploads (see §6.2 (e)). **Why it’s built this way:** it guarantees the report is uploaded **exactly once** with no duplicate‑upload storm, since only one phone at a time holds it in an uploadable state. **The trade‑off:** if the report was relayed to a downstream phone that *never* regains signal, while an **earlier** phone in the chain *does* get internet, the report still won’t be delivered — the earlier phone holds only a `relayed` copy and won’t retry it. The automatic relay reduces this risk by only relaying *toward* a better‑connected peer (`_ONLINE > _LOCAL > _OFFLINE`) and having the receiver upload the instant it has signal, but in manual relays or unlucky topologies the gap is real. This is the deeper reason behind limitation #10’s “best‑effort.”
 
 ### Scope
-11. **Resident app only.** Creating alerts, approving reports, and managing centers happen in the **separate admin/web system**, not here.
-12. **Photo upload depends on a live endpoint.** Some report‑photo upload changes are pending the web upload endpoint going live.
-13. **Cleartext traffic enabled** (`usesCleartextTraffic="true"`) to allow the local `http://` barangay server — acceptable for LAN, but means cloud calls should remain on HTTPS (they do).
+12. **Resident app only.** Creating alerts, approving reports, and managing centers happen in the **separate admin/web system**, not here.
+13. **Photo upload depends on a live endpoint.** Some report‑photo upload changes are pending the web upload endpoint going live.
+14. **Cleartext traffic enabled** (`usesCleartextTraffic="true"`) to allow the local `http://` barangay server — acceptable for LAN, but means cloud calls should remain on HTTPS (they do).
 
 ---
 

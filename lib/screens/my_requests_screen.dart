@@ -4,6 +4,7 @@ import 'package:socket_io_client/socket_io_client.dart' as IO;
 import '../constants.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../utils/geo_utils.dart';
 import 'request_chat_screen.dart';
 
 /// "<qty> <unit>" plus " · <barangay>" only when the barangay is real
@@ -13,6 +14,33 @@ String _qtyUnitBarangay(Map<String, dynamic> req) {
   final brgy = (req['barangay'] ?? '').toString();
   final showBrgy = brgy.isNotEmpty && brgy.toLowerCase() != 'unknown';
   return showBrgy ? '$base · $brgy' : base;
+}
+
+double? _toDouble(dynamic v) =>
+    v == null ? null : (v is num ? v.toDouble() : double.tryParse(v.toString()));
+
+/// Straight-line distance in km between the request and a helper's pledge, or
+/// null when either side lacks coordinates (e.g. the helper denied location).
+/// The request stores its coordinates as gpsLat/gpsLng; the pledge as
+/// pledgerLat/pledgerLng.
+double? _pledgeDistanceKm(Map<String, dynamic> req, Map<String, dynamic> pledge) {
+  final rLat = _toDouble(req['gpsLat']);
+  final rLng = _toDouble(req['gpsLng']);
+  final pLat = _toDouble(pledge['pledgerLat']);
+  final pLng = _toDouble(pledge['pledgerLng']);
+  if (rLat == null || rLng == null || pLat == null || pLng == null) return null;
+  return distanceKm(rLat, rLng, pLat, pLng);
+}
+
+/// "Brgy. X · 2.3 km away" / "2.3 km away" / "Brgy. X" / "Location not shared".
+String _pledgeLocationText(double? distKm, String? barangay) {
+  final brgy = (barangay ?? '').toString().trim();
+  final showBrgy = brgy.isNotEmpty && brgy.toLowerCase() != 'unknown';
+  final parts = <String>[
+    if (showBrgy) brgy,
+    if (distKm != null) '${distKm.toStringAsFixed(1)} km away',
+  ];
+  return parts.isEmpty ? 'Location not shared' : parts.join(' · ');
 }
 
 class MyRequestsScreen extends StatefulWidget {
@@ -485,6 +513,24 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
     final pledges = List<Map<String, dynamic>>.from(
       (req['pledges'] as List? ?? []).where((p) => p['status'] != 'withdrawn'),
     );
+    // Prioritize the closest helpers: offers with a known distance come first,
+    // ascending; offers without coordinates keep their original order at the
+    // bottom. A stable sort keeps same-distance offers in their existing order.
+    pledges.sort((a, b) {
+      final da = _pledgeDistanceKm(req, a);
+      final db = _pledgeDistanceKm(req, b);
+      if (da == null && db == null) return 0;
+      if (da == null) return 1;
+      if (db == null) return -1;
+      return da.compareTo(db);
+    });
+    // The nearest *pending* offer gets a "CLOSEST" badge to make the suggested
+    // pick obvious (only meaningful while the request is still open).
+    final closestPendingId = pledges
+        .firstWhere(
+          (p) => p['status'] == 'pending' && _pledgeDistanceKm(req, p) != null,
+          orElse: () => const {},
+        )['_id'];
     final isOpen =
         status == 'open' || status == 'pending' || status == 'approved';
     final isMatched = status == 'matched';
@@ -586,13 +632,15 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                       : () => showDialog(
                             context: context,
                             builder: (_) => AlertDialog(
-                              title: const Text('Release Match'),
+                              title: const Text('Reopen Request'),
                               content: const Text(
-                                'Did the matched helper back out? Releasing reopens your request so other people can offer to help again.',
+                                'Are you sure? This will cancel the current match and reopen your request to other helpers.',
                               ),
                               actions: [
                                 TextButton(
                                     onPressed: () => Navigator.pop(context),
+                                    style: TextButton.styleFrom(
+                                        foregroundColor: ET_GREEN),
                                     child: const Text('Keep Match')),
                                 TextButton(
                                   onPressed: () {
@@ -600,17 +648,17 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                                     _releaseMatch();
                                   },
                                   style: TextButton.styleFrom(
-                                      foregroundColor: ET_ORANGE),
-                                  child: const Text('Release'),
+                                      foregroundColor: ET_RED),
+                                  child: const Text('Find Another Helper'),
                                 ),
                               ],
                             ),
                           ),
                   icon: const Icon(Icons.link_off, size: 18),
-                  label: const Text('Helper backed out? Release'),
+                  label: const Text('Helper backed out? Reopen Request'),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: ET_ORANGE,
-                    side: const BorderSide(color: ET_ORANGE),
+                    foregroundColor: ET_GRAY,
+                    side: const BorderSide(color: ET_GRAY),
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10)),
@@ -651,7 +699,7 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                 Color badgeColor;
                 switch (pStatus) {
                   case 'accepted':
-                    badgeColor = ET_RED;
+                    badgeColor = ET_GREEN;
                     break;
                   case 'declined':
                     badgeColor = ET_GRAY;
@@ -660,12 +708,17 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                     badgeColor = ET_ORANGE;
                 }
 
+                final distKm = _pledgeDistanceKm(req, pledge);
+                final isClosest = isOpen &&
+                    pledge['_id'] != null &&
+                    pledge['_id'] == closestPendingId;
+
                 return Card(
                   margin: const EdgeInsets.only(bottom: 8),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(10),
                     side: pStatus == 'accepted'
-                        ? const BorderSide(color: ET_RED, width: 1.5)
+                        ? const BorderSide(color: ET_GREEN, width: 1.5)
                         : BorderSide.none,
                   ),
                   child: Padding(
@@ -680,9 +733,29 @@ class _MyRequestDetailScreenState extends State<MyRequestDetailScreen> {
                                   style: const TextStyle(
                                       fontWeight: FontWeight.bold)),
                             ),
+                            if (isClosest) ...[
+                              const _Badge(label: 'CLOSEST', color: ET_GREEN),
+                              const SizedBox(width: 6),
+                            ],
                             _Badge(
                                 label: pStatus.toUpperCase(),
                                 color: badgeColor),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Icon(Icons.location_on,
+                                size: 13, color: ET_GRAY),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                _pledgeLocationText(
+                                    distKm, pledge['pledgerBarangay']),
+                                style: const TextStyle(
+                                    fontSize: 12, color: ET_GRAY),
+                              ),
+                            ),
                           ],
                         ),
                         if ((pledge['phone'] ?? '').toString().isNotEmpty) ...[
